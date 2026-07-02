@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
@@ -94,6 +95,7 @@ class BlockTable:
 
         self.kernel_sizes = kernel_sizes
         self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
+        self.kv_cache_group = kv_cache_group
 
     def append_row(
         self,
@@ -140,6 +142,7 @@ class BlockTable:
         num_reqs: int,
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
+        group_id: int = -1,
     ) -> None:
         num_tokens = positions.shape[0]
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
@@ -159,8 +162,38 @@ class BlockTable:
             PAD_ID=PAD_SLOT_ID,
             BLOCK_SIZE=1024,
         )
+        # [DEBUG HMA] Log slot_mapping to verify KV cache indexing correctness
+        if num_tokens > 0:
+            slot_mapping_gpu = self.slot_mapping.gpu[:num_tokens]
+            pad_count = (slot_mapping_gpu == PAD_SLOT_ID).sum().item()
+            valid_slots = slot_mapping_gpu[slot_mapping_gpu != PAD_SLOT_ID]
+            slot_min = valid_slots.min().item() if valid_slots.numel() > 0 else -1
+            slot_max = valid_slots.max().item() if valid_slots.numel() > 0 else -1
+            # Extract spec type and layer names for identification
+            spec_type = "N/A"
+            layer_names = "N/A"
+            kv_group = getattr(self, 'kv_cache_group', None)
+            if kv_group is not None:
+                spec = getattr(kv_group, 'kv_cache_spec', None)
+                if spec is not None:
+                    spec_type = type(spec).__name__
+                layer_names = getattr(kv_group, 'layer_names', 'N/A')
+                if layer_names and len(layer_names) > 3:
+                    layer_names = str(layer_names[:3]) + '...'
+            logger.warning(
+                "SLOT_MAPPING group_id=%d spec=%s layers=%s "
+                "num_tokens=%d num_reqs=%d block_size=%d kernel_sizes=%s "
+                "pad_count=%d slot_min=%d slot_max=%d positions[:5]=%s "
+                "first_slots[:10]=%s",
+                group_id, spec_type, layer_names,
+                num_tokens, num_reqs, self.block_size,
+                getattr(self, 'kernel_sizes', 'N/A'),
+                pad_count, slot_min, slot_max,
+                positions[:5].tolist() if torch.is_tensor(positions) else "N/A",
+                slot_mapping_gpu[:10].tolist(),
+            )
 
-    def compute_slot_mapping_draft(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
+    def compute_slot_mapping_draft(self, req_indices: np.ndarray, positions: np.ndarray, group_id: int = -1) -> None:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
         # where K is the max_num_blocks_per_req and the block size is 2.
@@ -347,7 +380,19 @@ class MultiGroupBlockTable:
             ]
 
     def append_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
+        # [DEBUG HMA] Log block_ids per group to verify block allocation correctness
         for i, block_table in enumerate(self.block_tables):
+            bid_list = block_ids[i] if i < len(block_ids) else []
+            if bid_list:
+                logger.warning(
+                    "BLOCK_IDS group=%d row=%d num_blocks=%d first_5=%s "
+                    "block_size=%d logical_block_size=%d blocks_per_phys=%d "
+                    "use_hybrid=%s",
+                    i, row_idx, len(bid_list), list(bid_list)[:5],
+                    block_table.physical_block_size, block_table.logical_block_size,
+                    block_table.blocks_per_phys_block,
+                    block_table.use_hybrid_blocks,
+                )
             block_table.append_row(block_ids[i], row_idx)
 
     def add_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
@@ -378,7 +423,7 @@ class MultiGroupBlockTable:
             if positions_compressed_list and req_indices_compressed_list:
                 block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
             else:
-                block_table.compute_slot_mapping(num_reqs, query_start_loc, positions)
+                block_table.compute_slot_mapping(num_reqs, query_start_loc, positions, group_id=i)
 
     def compute_slot_mapping_draft(
         self,
@@ -389,9 +434,9 @@ class MultiGroupBlockTable:
     ) -> None:
         for i, block_table in enumerate(self.block_tables):
             if positions_compressed_list and req_indices_compressed_list:
-                block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
+                block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i], group_id=i)
             else:
-                block_table.compute_slot_mapping_draft(req_indices, positions)
+                block_table.compute_slot_mapping_draft(req_indices, positions, group_id=i)
 
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:

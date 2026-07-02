@@ -11,6 +11,9 @@ from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheSpec,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
@@ -162,6 +165,30 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             max_model_len = cdiv(max_model_len, dcp_world_size * pcp_world_size)
         return cdiv(max_model_len, self.block_size * self.compress_ratio) * self.page_size_bytes
 
+    def get_kv_cache_layout(self):
+        """Return the physical memory layout strategy for this MLA spec.
+
+        Decision tree (evaluated in order):
+        1. compress_ratio > 1  → CompressedMLALayout (DS V4 fp8)
+        2. cache_sparse_c8     → SparseMLAC8Layout   (DS V3.2 + C8 quant)
+        3. sparse_head_dim set → SparseMLALayout      (DS V3.2 sparse)
+        4. otherwise           → SplitKVLayout        (standard MLA)
+        """
+        from vllm_ascend.core.kv_cache_layout import (
+            CompressedMLALayout,
+            SparseMLAC8Layout,
+            SparseMLALayout,
+            SplitKVLayout,
+        )
+
+        if self.compress_ratio > 1:
+            return CompressedMLALayout()
+        if self.cache_sparse_c8:
+            return SparseMLAC8Layout()
+        if self.sparse_head_dim is not None:
+            return SparseMLALayout()
+        return SplitKVLayout()
+
 
 def _init_mla_cache_fields(spec: MLAAttentionSpec | SlidingWindowMLASpec):
     """Shared MLA cache init logic for quantiztion format across different models."""
@@ -228,7 +255,66 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
             model_version=model_version_set.pop(),
         )
 
+    def get_kv_cache_layout(self):
+        """Sliding window MLA: CompressedMLALayout if compressed, else SplitKVLayout."""
+        from vllm_ascend.core.kv_cache_layout import (
+            CompressedMLALayout,
+            SplitKVLayout,
+        )
 
+        if self.compress_ratio > 1:
+            return CompressedMLALayout()
+        return SplitKVLayout()
+
+
+# ---------------------------------------------------------------------------
+# AscendFullAttentionSpec — GQA/SWA models always use SplitKVLayout on Ascend
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, kw_only=True)
+class AscendFullAttentionSpec(FullAttentionSpec):
+    """FullAttentionSpec with Ascend physical layout dispatch.
+
+    On Ascend, all GQA / sliding window attention models require physically
+    separated K and V tensors for PD RDMA alignment.
+    """
+
+    def get_kv_cache_layout(self):
+        from vllm_ascend.core.kv_cache_layout import SplitKVLayout
+
+        return SplitKVLayout()
+
+
+# ---------------------------------------------------------------------------
+# Monkey-patch upstream classes
+# ---------------------------------------------------------------------------
+
+# Replace upstream Spec classes with Ascend-aware versions
 vllm.v1.kv_cache_interface.MLAAttentionSpec = AscendMLAAttentionSpec
 vllm.v1.kv_cache_interface.SlidingWindowMLASpec = AscendSlidingWindowMLASpec
+vllm.v1.kv_cache_interface.FullAttentionSpec = AscendFullAttentionSpec
 vllm.model_executor.layers.attention.mla_attention.MLAAttentionSpec = AscendMLAAttentionSpec
+
+
+# ---------------------------------------------------------------------------
+# Layout dispatch for non-patched Spec classes
+# ---------------------------------------------------------------------------
+
+def _mamba_get_kv_cache_layout(self):
+    """Mamba / linear_attn: carve multiple states from a single buffer."""
+    from vllm_ascend.core.kv_cache_layout import MambaLayout
+
+    return MambaLayout()
+
+
+def _kvcachespec_get_kv_cache_layout(self):
+    """Default fallback — works for HiddenStateCacheSpec and unpatched specs."""
+    from vllm_ascend.core.kv_cache_layout import SingleTensorLayout
+
+    return SingleTensorLayout()
+
+
+# Attach to upstream classes that don't have Ascend subclasses
+MambaSpec.get_kv_cache_layout = _mamba_get_kv_cache_layout
+KVCacheSpec.get_kv_cache_layout = _kvcachespec_get_kv_cache_layout

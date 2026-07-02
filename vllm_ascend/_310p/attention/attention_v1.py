@@ -71,6 +71,24 @@ class AscendAttentionBackend310(AscendAttentionBackend):
         # Align to a multiple of 16, as required by the 310P device.
         return (2, num_blocks, (num_kv_heads * head_size) // 16, block_size, 16)
 
+    @classmethod
+    def get_kv_cache_block_dim(
+        cls,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "",
+    ) -> int:
+        """Override: return 0 to skip as_strided_ in Hybrid layout transform.
+
+        The Ascend 310P NPU attention kernels use raw-pointer arithmetic
+        and ignore PyTorch tensor strides. See the matching override in
+        AscendAttentionBackend for full explanation.
+
+        See: PR-10018 Hybrid model output corruption fix.
+        """
+        return 0
+
     @staticmethod
     def get_impl_cls():
         """

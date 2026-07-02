@@ -112,6 +112,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
     # Whether to use MultiBlockPool for KV cache management
     "VLLM_ASCEND_APPLY_DSV4_PATCH": lambda: bool(int(os.getenv("VLLM_ASCEND_APPLY_DSV4_PATCH", "0"))),
+    # Whether to enable the new Layout-driven KV cache allocate/reshape dispatch.
+    # When enabled (1), KVCacheLayout subclasses drive how many tensors are
+    # allocated and how they are reshaped, replacing the old if/else tree in
+    # model_runner_v1.py. Default 0 for safe rollout.
+    "VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH", "0"))
+    ),
 }
 
 # end-env-vars-definition

@@ -17,6 +17,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
+import logging
 
 import torch
 import torch_npu
@@ -69,6 +70,12 @@ from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
 
+logger = logging.getLogger(__name__)
+
+# [DEBUG HMA] Toggle for Hybrid model KV cache diagnostics.
+# Set to False when the fix is confirmed.
+_HMA_DEBUG_ENABLED = True
+
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
@@ -106,6 +113,33 @@ class AscendAttentionBackend(AttentionBackend):
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
         return (2, num_blocks, block_size, num_kv_heads, head_size)
+
+    @classmethod
+    def get_kv_cache_block_dim(
+        cls,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "",
+    ) -> int:
+        """Override: return 0 to skip as_strided_ in Hybrid layout transform.
+
+        The Ascend NPU attention kernels use raw-pointer arithmetic
+        (data_ptr() + offset) and ignore PyTorch tensor strides.
+        Returning 0 tells _update_hybrid_attention_mamba_layout() that
+        this backend's tensors are already in the expected physical
+        layout, preventing a stride transformation that corrupts K/V
+        cache indexing for Hybrid (Attention + Mamba) models.
+
+        Without this override, the default implementation returns
+        shape.index(num_blocks)=1, which triggers as_strided_ with
+        stride=(hidden_size, 2*hidden_size, ...). The NPU kernels then
+        read/write wrong physical offsets because they compute offsets
+        from shape dimensions, not from the tensor's actual stride.
+
+        See: PR-10018 Hybrid model output corruption fix.
+        """
+        return 0
 
     @staticmethod
     def swap_blocks(
@@ -1022,12 +1056,32 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
             num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
-            key = self.key_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
-            value = self.value_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
+
+            # [DEBUG HMA] Check if key_cache is contiguous before .view().
+            # If as_strided_ was applied, .view() will raise RuntimeError
+            # because the tensor is non-contiguous. This is a canary for
+            # the _update_hybrid_attention_mamba_layout corruption.
+            if _HMA_DEBUG_ENABLED and not self.key_cache.is_contiguous():
+                logger.warning(
+                    "HMA_FIA_DECODE_NONCONTIG kc_shape=%s kc_stride=%s kc_contig=%s "
+                    "vc_shape=%s vc_stride=%s vc_contig=%s "
+                    "NOTE: .view() will FAIL due to non-contiguous tensor!",
+                    tuple(self.key_cache.shape), tuple(self.key_cache.stride()),
+                    self.key_cache.is_contiguous(),
+                    tuple(self.value_cache.shape), tuple(self.value_cache.stride()),
+                    self.value_cache.is_contiguous(),
+                )
+                # Use .reshape() instead of .view() — creates a copy if needed,
+                # but mask the underlying data corruption
+                key = self.key_cache.reshape(num_block, block_size, -1)
+                value = self.value_cache.reshape(num_block, block_size, -1)
+            else:
+                key = self.key_cache.view(  # type: ignore
+                    num_block, block_size, -1
+                )
+                value = self.value_cache.view(  # type: ignore
+                    num_block, block_size, -1
+                )
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         # chunked prefill.
@@ -1219,6 +1273,37 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if self.key_cache is None:
             self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
+        # [DEBUG HMA] Diagnose KV cache tensor layout before write.
+        # Key indicators of the as_strided_ corruption:
+        #  - kc_contig=False means stride ≠ contiguous (as_strided_ was applied)
+        #  - kc_stride[0] > expected (= block_size * n_kv_heads * head_size)
+        #    means blocks are "stretched" — NPU kernel will write to wrong offset.
+        #  - vc_storage_off != num_blocks * hidden_size means V cache starts at
+        #    wrong position (should be num_blocks * block_size * n_kv_heads * head_size).
+        if _HMA_DEBUG_ENABLED:
+            kc = self.key_cache
+            vc = self.value_cache
+            hidden_per_block = int(torch.tensor(kc.shape[1:]).prod())
+            expected_kc_stride0 = hidden_per_block
+            actual_kc_stride0 = kc.stride()[0] if kc.ndim >= 1 else -1
+            expected_vc_storage_off = kc.shape[0] * hidden_per_block
+            actual_vc_storage_off = vc.storage_offset()
+            ptr_diff = vc.data_ptr() - kc.data_ptr()
+
+            logger.warning(
+                "HMA_KV_CACHE_WRITE layer=%s "
+                "kc_shape=%s kc_stride=%s kc_contig=%s kc_stride0=%d expected_kc_stride0=%d "
+                "vc_shape=%s vc_stride=%s vc_contig=%s vc_storage_off=%d expected_vc_storage_off=%d "
+                "ptr_diff=%d hidden_per_block=%d slots[:5]=%s",
+                layer.layer_name,
+                tuple(kc.shape), tuple(kc.stride()), kc.is_contiguous(),
+                actual_kc_stride0, expected_kc_stride0,
+                tuple(vc.shape), tuple(vc.stride()), vc.is_contiguous(),
+                actual_vc_storage_off, expected_vc_storage_off,
+                ptr_diff, hidden_per_block,
+                slot_mapping[:5].tolist() if slot_mapping.numel() >= 5 else slot_mapping.tolist(),
+            )
+
         DeviceOperator.reshape_and_cache(
             key=key,
             value=value,
@@ -1243,6 +1328,39 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
             encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
+
+            if _HMA_DEBUG_ENABLED:
+                kc = self.key_cache
+                vc = self.value_cache
+                slots_cpu = slots[: min(10, attn_metadata.num_actual_tokens)].cpu().tolist()
+                block_ids = [s // kc.shape[1] for s in slots_cpu] if kc.ndim >= 2 else [-1]
+                offsets = [s % kc.shape[1] for s in slots_cpu] if kc.ndim >= 2 else [-1]
+
+                # Also check if block_table is available in metadata
+                if hasattr(attn_metadata, 'block_tables') and attn_metadata.block_tables is not None:
+                    bt = attn_metadata.block_tables
+                    bt_sample = bt[0, :5].cpu().tolist() if bt.numel() >= 5 else bt.cpu().tolist()
+                else:
+                    bt_sample = "N/A"
+
+                logger.warning(
+                    "HMA_RESHAPE_AND_CACHE layer=%s "
+                    "kc_shape=%s kc_stride=%s kc_contig=%s kc_dtype=%s "
+                    "vc_shape=%s vc_stride=%s vc_contig=%s vc_dtype=%s "
+                    "kc_data_ptr=%d vc_data_ptr=%d ptr_diff=%d "
+                    "num_tokens=%d slots[:10]=%s block_ids[:10]=%s offsets[:10]=%s "
+                    "block_table_sample=%s "
+                    "key_shape=%s value_shape=%s",
+                    self.layer.layer_name if hasattr(self, 'layer') and self.layer else "unknown",
+                    tuple(kc.shape), tuple(kc.stride()), kc.is_contiguous(), str(kc.dtype),
+                    tuple(vc.shape), tuple(vc.stride()), vc.is_contiguous(), str(vc.dtype),
+                    kc.data_ptr(), vc.data_ptr(), vc.data_ptr() - kc.data_ptr(),
+                    attn_metadata.num_actual_tokens,
+                    slots_cpu, block_ids, offsets,
+                    bt_sample,
+                    tuple(key.shape), tuple(value.shape),
+                )
+
             DeviceOperator.reshape_and_cache(
                 key=key[: attn_metadata.num_actual_tokens] if not encoder_decoder else key,
                 value=value[: attn_metadata.num_actual_tokens] if not encoder_decoder else value,
@@ -1324,6 +1442,29 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 and len(kv_cache) >= 2
             ):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+
+                # [DEBUG HMA] Log the full 5D kv_cache tensor properties
+                # when first seen by an Attention layer. This confirms
+                # whether as_strided_ was applied upstream.
+                if _HMA_DEBUG_ENABLED and isinstance(kv_cache, torch.Tensor):
+                    full_hidden = kv_cache.shape[2:].numel() if kv_cache.ndim >= 5 else -1
+                    logger.warning(
+                        "HMA_FORWARD_FIRST_CACHE layer=%s "
+                        "full_shape=%s full_stride=%s full_contig=%s "
+                        "kc_shape=%s kc_stride=%s kc_contig=%s kc_storage_off=%d "
+                        "vc_shape=%s vc_stride=%s vc_contig=%s vc_storage_off=%d "
+                        "dim0_is_2=%s dim1_is_blocks=%s hidden_size=%d",
+                        layer.layer_name,
+                        tuple(kv_cache.shape), tuple(kv_cache.stride()),
+                        kv_cache.is_contiguous(),
+                        tuple(self.key_cache.shape), tuple(self.key_cache.stride()),
+                        self.key_cache.is_contiguous(), self.key_cache.storage_offset(),
+                        tuple(self.value_cache.shape), tuple(self.value_cache.stride()),
+                        self.value_cache.is_contiguous(), self.value_cache.storage_offset(),
+                        kv_cache.shape[0] == 2 if kv_cache.ndim >= 1 else False,
+                        kv_cache.shape[1] > 100 if kv_cache.ndim >= 2 else False,
+                        full_hidden,
+                    )
 
         output_padded = None
         if key is not None and value is not None:

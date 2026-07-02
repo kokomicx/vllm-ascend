@@ -126,6 +126,12 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
+from vllm_ascend.core.kv_cache_layout import (
+    KVCacheLayout,
+    MambaLayout,
+    SingleTensorLayout,
+)
+from vllm_ascend.envs import VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
@@ -697,6 +703,20 @@ class NPUModelRunner(GPUModelRunner):
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
+
+        # [DEBUG HMA] Verify block_table GPU content across groups
+        if num_reqs > 0 and hasattr(self.input_batch.block_table, 'block_tables'):
+            for gid, bt in enumerate(self.input_batch.block_table.block_tables):
+                bt_gpu = bt.get_device_tensor()
+                # Sample first request's block table row
+                row0 = bt_gpu[0, :min(10, bt_gpu.shape[1])]
+                logger.warning(
+                    "BLOCK_TABLE_GPU group=%d block_size=%d logical_size=%d "
+                    "blocks_per_phys=%d req0_first_10=%s",
+                    gid, bt.block_size, bt.logical_block_size,
+                    bt.blocks_per_phys_block,
+                    row0.tolist(),
+                )
 
         req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
 
@@ -2065,6 +2085,28 @@ class NPUModelRunner(GPUModelRunner):
 
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
+                # [DEBUG HMA] Log hidden_states and logits to verify model output sanity
+                logger.warning(
+                    "HIDDEN_STATES num_tokens=%d shape=%s mean=%.6f std=%.6f "
+                    "has_nan=%s has_inf=%s",
+                    sample_hidden_states.shape[0],
+                    tuple(sample_hidden_states.shape),
+                    sample_hidden_states.float().mean().item(),
+                    sample_hidden_states.float().std().item(),
+                    torch.isnan(sample_hidden_states).any().item(),
+                    torch.isinf(sample_hidden_states).any().item(),
+                )
+                logger.warning(
+                    "LOGITS shape=%s mean=%.6f std=%.6f has_nan=%s has_inf=%s "
+                    "top5_token_ids=%s top5_probs=%s",
+                    tuple(logits.shape),
+                    logits.float().mean().item(),
+                    logits.float().std().item(),
+                    torch.isnan(logits).any().item(),
+                    torch.isinf(logits).any().item(),
+                    logits[0].topk(5).indices.tolist(),
+                    [f"{v:.4f}" for v in logits[0].softmax(dim=-1).topk(5).values.tolist()],
+                )
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -2163,6 +2205,21 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+        # [DEBUG HMA] Log sampled token IDs to verify model output correctness
+        sampled_ids = sampler_output.sampled_token_ids
+        if torch.is_tensor(sampled_ids):
+            logger.warning(
+                "SAMPLED_TOKENS shape=%s first_10=%s",
+                tuple(sampled_ids.shape),
+                sampled_ids.flatten()[:10].tolist(),
+            )
+        else:
+            logger.warning(
+                "SAMPLED_TOKENS type=%s len=%s first_10=%s",
+                type(sampled_ids).__name__,
+                len(sampled_ids) if isinstance(sampled_ids, list) else 'N/A',
+                sampled_ids[:10] if isinstance(sampled_ids, list) else 'N/A',
+            )
 
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
@@ -3535,6 +3592,254 @@ class NPUModelRunner(GPUModelRunner):
         offset = (aligned_addr - data_ptr) // tensor.element_size()
         return tensor[int(offset) :]
 
+    # ------------------------------------------------------------------
+    # Layout-driven KV cache dispatch (V2)
+    # Gated behind VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH=1.
+    # Replaces the old if-else allocate/reshape tree with polymorphic
+    # KVCacheLayout.split_sizes / reshape calls.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _alloc_aligned(size: int, alignment: int, device: torch.device) -> torch.Tensor:
+        """Allocate a flat int8 buffer and slice to 2 MB alignment."""
+        buf = torch.zeros(size + alignment, dtype=torch.int8, device=device)
+        data_ptr = buf.data_ptr()
+        aligned_addr = (data_ptr + alignment - 1) // alignment * alignment
+        offset = (aligned_addr - data_ptr) // buf.element_size()
+        return buf[int(offset):][:size]
+
+    def _build_layout_kwargs(
+        self,
+        layer_name: str,
+        spec: AttentionSpec,
+    ) -> dict[str, Any]:
+        """Build kwargs consumed by KVCacheLayout.split_sizes / reshape.
+
+        Only needed for SplitKVLayout — other layouts ignore these kwargs.
+        """
+        k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, spec)
+        kwargs: dict[str, Any] = {
+            "head_dims": (k_dim, v_dim),
+            "vllm_config": self.vllm_config,
+            "layer_name": layer_name,
+        }
+        if enable_fa_quant(self.vllm_config):
+            kwargs["quant_config"] = self.vllm_config.quant_config
+        return kwargs
+
+    def _allocate_kv_cache_tensors_v2(
+        self, kv_cache_config: KVCacheConfig,
+    ) -> dict[str, torch.Tensor | tuple[torch.Tensor, ...]]:
+        """Layout-driven KV cache tensor allocation.
+
+        For each ``KVCacheTensor`` (layers sharing one physical buffer):
+        1. Detect hybrid (Mamba + Attention) → force SingleTensorLayout
+        2. Pure Mamba → MambaLayout
+        3. Pure Attention → ``spec.get_kv_cache_layout()``
+        4. Call ``layout.split_sizes()`` and allocate flat int8 buffers
+        """
+        ALIGNMENT = 2 * 1024 * 1024
+        need_align = self.vllm_config.kv_transfer_config is not None
+        layer_specs = self._get_layer_kv_cache_specs(kv_cache_config)
+        kv_cache_raw_tensors: dict = {}
+
+        for tensor_spec in kv_cache_config.kv_cache_tensors:
+            specs = [layer_specs[n] for n in tensor_spec.shared_by]
+            has_mamba = any(isinstance(s, MambaSpec) for s in specs)
+            has_attn = any(isinstance(s, AttentionSpec) for s in specs)
+            is_cache_only = any("cache_only_layers" in n for n in tensor_spec.shared_by)
+
+            if has_mamba and has_attn:
+                # Hybrid attn+mamba sharing the same buffer
+                layout: KVCacheLayout = SingleTensorLayout()
+                spec_for_split = specs[0]
+                split_kwargs: dict[str, Any] = {}
+            elif has_mamba and not has_attn:
+                # Pure Mamba / linear-attention
+                layout = MambaLayout()
+                spec_for_split = specs[0]
+                split_kwargs = {}
+            elif is_cache_only:
+                # cache_only_layers store hidden states (no K/V split)
+                layout = SingleTensorLayout()
+                spec_for_split = specs[0]
+                split_kwargs = {}
+            else:
+                # Pure attention — dispatch via Layout
+                first_attn = next(
+                    n for n in tensor_spec.shared_by
+                    if isinstance(layer_specs[n], AttentionSpec)
+                )
+                spec_for_split = layer_specs[first_attn]
+                layout = spec_for_split.get_kv_cache_layout()
+                split_kwargs = self._build_layout_kwargs(first_attn, spec_for_split)
+
+            sizes = layout.split_sizes(tensor_spec.size, spec_for_split, **split_kwargs)
+            assert len(sizes) == layout.num_tensors(), (
+                f"{layout.__class__.__name__}.split_sizes returned {len(sizes)} "
+                f"sizes but num_tensors={layout.num_tensors()}"
+            )
+
+            if need_align and layout.needs_alignment():
+                tensors = [
+                    self._alloc_aligned(sz, ALIGNMENT, self.device) for sz in sizes
+                ]
+            else:
+                tensors = [
+                    torch.zeros(sz, dtype=torch.int8, device=self.device)
+                    for sz in sizes
+                ]
+
+            value: torch.Tensor | tuple = (
+                tensors[0] if layout.num_tensors() == 1 else tuple(tensors)
+            )
+            for name in tensor_spec.shared_by:
+                kv_cache_raw_tensors[name] = value
+
+        # Validate every layer got initialized
+        expected: set[str] = set()
+        for group in kv_cache_config.kv_cache_groups:
+            for layer_name in group.layer_names:
+                if layer_name not in self.runner_only_attn_layers:
+                    expected.add(layer_name)
+        missing = expected - set(kv_cache_raw_tensors.keys())
+        extra = set(kv_cache_raw_tensors.keys()) - expected
+        assert not missing and not extra, (
+            f"Layer mismatch: missing={missing}, extra={extra}"
+        )
+
+        return kv_cache_raw_tensors
+
+    def _reshape_kv_cache_tensors_v2(
+        self,
+        kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, ...]],
+        kernel_block_sizes: list[int],
+    ) -> dict[str, torch.Tensor]:
+        """Unified Layout-driven KV cache reshape.
+
+        Replaces BOTH old reshape methods with a single loop that delegates
+        to ``layout.reshape()``.  Hybrid post-processing is preserved.
+        """
+        kv_caches: dict[str, torch.Tensor] = {}
+        has_attn, has_mamba = False, False
+
+        for group in self._kv_cache_spec_attn_group_iterator():
+            backend = group.backend
+            spec = group.kv_cache_spec
+            if group.kv_cache_group_id == len(kernel_block_sizes):
+                continue
+            kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
+
+            for layer_name in group.layer_names:
+                if layer_name in self.runner_only_attn_layers:
+                    continue
+
+                raw = kv_cache_raw_tensors[layer_name]
+                layout = spec.get_kv_cache_layout()
+
+                # Normalize raw data to list[torch.Tensor]
+                raw_list: list[torch.Tensor] = (
+                    list(raw) if isinstance(raw, tuple) else [raw]
+                )
+                total_raw_bytes = sum(t.numel() for t in raw_list)
+                num_blocks = total_raw_bytes // spec.page_size_bytes
+
+                if isinstance(spec, AttentionSpec):
+                    has_attn = True
+                    num_blocks_per_kv_block = spec.block_size // kernel_block_size
+                    kernel_num_blocks = num_blocks * num_blocks_per_kv_block
+                else:
+                    has_mamba = True
+                    kernel_num_blocks = num_blocks
+
+                kwargs = (
+                    self._build_layout_kwargs(layer_name, spec)
+                    if isinstance(spec, AttentionSpec)
+                    else {}
+                )
+
+                result = layout.reshape(
+                    raw_list,
+                    spec,
+                    num_blocks=num_blocks,
+                    kernel_num_blocks=kernel_num_blocks,
+                    kernel_block_size=kernel_block_size,
+                    backend=backend,
+                    vllm_config=self.vllm_config,
+                    **kwargs,
+                )
+                kv_caches[layer_name] = result
+
+        if has_attn and has_mamba:
+            self._update_hybrid_attention_mamba_layout(kv_caches, kernel_block_sizes)
+
+        return kv_caches
+
+    def _initialize_kv_cache_tensors_v2(
+        self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int],
+    ) -> dict[str, torch.Tensor]:
+        """V2 initialize: allocate + reshape + common post-processing."""
+        kv_cache_raw_tensors = self._allocate_kv_cache_tensors_v2(kv_cache_config)
+        kv_caches = self._reshape_kv_cache_tensors_v2(
+            kv_cache_raw_tensors, kernel_block_sizes,
+        )
+
+        # --- Cross-layer KV cache sharing ---
+        for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
+            logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
+            kv_caches[layer_name] = kv_caches[target_layer_name]
+
+        # --- DS V4 ordering or bind_kv_cache ---
+        if self.model_config.hf_text_config.model_type == "deepseek_v4":
+            from vllm_ascend.utils import extract_dsv4_layer_index
+
+            assert len(self.kv_caches) == 0
+            for layer_name in sorted(
+                kv_caches,
+                key=lambda name: (
+                    extract_dsv4_layer_index(
+                        self.model_config.hf_text_config, name,
+                    ),
+                    name,
+                ),
+            ):
+                self.kv_caches.append(kv_caches[layer_name])
+            for layer_name, kv_cache in kv_caches.items():
+                self.compilation_config.static_forward_context[
+                    layer_name
+                ].kv_cache = [kv_cache]
+        else:
+            from vllm.v1.worker.utils import bind_kv_cache
+
+            num_attn_module = (
+                2
+                if self.model_config.hf_text_config.model_type == "longcat_flash"
+                else 1
+            )
+            bind_kv_cache(
+                kv_caches,
+                self.compilation_config.static_forward_context,
+                self.kv_caches,
+                num_attn_module,
+            )
+
+        # --- Hamming sparse hash init ---
+        if self.enable_hamming_sparse is True:
+            from vllm_ascend.worker.kvcomp_utils import init_and_bind_hashk_cache
+
+            init_and_bind_hashk_cache(
+                kv_caches=kv_caches,
+                num_attn_module=num_attn_module,
+                vllm_config=self.vllm_config,
+                device=self.device,
+                compilation_config=self.compilation_config,
+                kvcomp_meta_data=self.kvcomp_meta_data,
+            )
+
+        return kv_caches
+
+    # --- Original initialize_kv_cache_tensors (gated) ---
+
     def initialize_kv_cache_tensors(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
     ) -> dict[str, torch.Tensor]:
@@ -3548,6 +3853,11 @@ class NPUModelRunner(GPUModelRunner):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
+        if VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH:
+            return self._initialize_kv_cache_tensors_v2(
+                kv_cache_config, kernel_block_sizes,
+            )
+
         # Initialize the memory buffer for KV cache
         kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
 
@@ -4052,6 +4362,16 @@ class NPUModelRunner(GPUModelRunner):
                     dtype = kv_cache_spec.dtype
 
                     kv_cache = kv_cache_raw_tensors[layer_name].view(dtype).view(kv_cache_shape)
+                    # [DEBUG HMA] Log KV cache reshape to verify shape correctness
+                    logger.warning(
+                        "KV_RESHAPE_ATTN layer=%s spec_block_size=%d kernel_block_size=%d "
+                        "num_blocks_per_kv=%d num_phys_blocks=%d kernel_num_blocks=%d "
+                        "shape=%s dtype=%s page_size_bytes=%d raw_bytes=%d",
+                        layer_name, kv_cache_spec.block_size, kernel_block_size,
+                        num_blocks_per_kv_block, num_blocks, kernel_num_blocks,
+                        tuple(kv_cache_shape), dtype,
+                        kv_cache_spec.page_size_bytes, raw_tensor.numel(),
+                    )
                     kv_caches[layer_name] = kv_cache
 
                 elif isinstance(kv_cache_spec, MambaSpec):
@@ -4062,6 +4382,15 @@ class NPUModelRunner(GPUModelRunner):
                         shapes_with_blocks,
                         kv_cache_spec.dtypes,
                         kv_cache_spec.page_size_bytes
+                    )
+                    # [DEBUG HMA] Log Mamba KV cache reshape
+                    logger.warning(
+                        "KV_RESHAPE_MAMBA layer=%s spec_block_size=%d num_blocks=%d "
+                        "shapes=%s dtypes=%s page_size_bytes=%d raw_bytes=%d",
+                        layer_name, kv_cache_spec.block_size, num_blocks,
+                        [tuple(s) for s in kv_cache_spec.shapes],
+                        kv_cache_spec.dtypes,
+                        kv_cache_spec.page_size_bytes, raw_tensor.numel(),
                     )
                     kv_caches[layer_name] = state_tensors
                 else:
@@ -4090,10 +4419,18 @@ class NPUModelRunner(GPUModelRunner):
         block_sizes = []
         max_num_blocks = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
-        for kv_cache_group in kv_cache_config.kv_cache_groups:
+        for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
             block_size = kv_cache_group.kv_cache_spec.block_size
+            # [DEBUG HMA] Trace block_size source in Hybrid models
+            logger.warning(
+                "BLOCK_SIZE_SOURCE group=%d spec_block_size=%d "
+                "cache_config_block_size=%d spec_type=%s layer_count=%d",
+                i, block_size, self.cache_config.block_size,
+                type(kv_cache_group.kv_cache_spec).__name__,
+                len(kv_cache_group.layer_names),
+            )
             block_sizes.append(block_size)
             max_num_blocks_per_req = cdiv(
                 max_model_len, block_size * get_total_cp_world_size()
