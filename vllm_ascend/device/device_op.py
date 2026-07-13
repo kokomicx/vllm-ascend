@@ -24,8 +24,8 @@ from vllm_ascend.device.mxfp_compat import (
     QUANT_DTYPES,
     SCALE_DTYPES,
 )
-from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
-from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
+# Lazy imports for triton kernels moved inside chunk_scaled_dot_kkt_fwd / solve_tril_16x16
+# to avoid circular import with vllm_ascend.ops -> fused_moe -> experts_selector -> device_op
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -502,6 +502,7 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
+        from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel  # noqa: lazy import
         chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
             k=k,
             beta=beta,
@@ -536,6 +537,7 @@ class BaseDeviceAdaptor:
         NT,
         B,
     ):
+        from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel  # noqa: lazy import
         extract_slice_stride_1 = LARGE_BLOCK_T // 32
         solve_tril_16x16_kernel[NT, B * H](
             A=A,
@@ -1121,6 +1123,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
+        from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel  # noqa: lazy import
         chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
             k=k,
             beta=beta,
@@ -1155,6 +1158,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         NT,
         B,
     ):
+        from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel  # noqa: lazy import
         solve_tril_16x16_kernel[NT, B * H](
             A=A,
             Ad=Ad,
