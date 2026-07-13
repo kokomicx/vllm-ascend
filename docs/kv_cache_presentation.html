@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KV Cache Token级存储对比：vLLM vs vLLM-Ascend</title>
+<style>
+  :root {
+    --upstream: #2563EB; --upstream-light: #DBEAFE; --upstream-bg: #EFF6FF;
+    --ascend: #C60054; --ascend-light: #FCE7F3; --ascend-bg: #FDF2F8;
+    --gap: #DC2626; --gap-light: #FEE2E2;
+    --text: #1E293B; --text-sec: #64748B;
+    --bg: #F8FAFC; --card: #FFFFFF; --border: #E2E8F0;
+    --k-color: #3B82F6; --v-color: #EF4444;
+    --nope-color: #8B5CF6; --rope-color: #F59E0B;
+    --scale-color: #10B981; --indexer-color: #EC4899; --padding-color: #9CA3AF;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.6;
+  }
+
+  .hero {
+    background: linear-gradient(135deg, #0F172A 0%, #1E293B 40%, #312E81 100%);
+    color: white; padding: 60px 80px 50px; text-align: center;
+    position: relative; overflow: hidden;
+  }
+  .hero::before {
+    content: ''; position: absolute; top: -50%; left: -50%;
+    width: 200%; height: 200%;
+    background: radial-gradient(circle at 30% 70%, rgba(37,99,235,0.15) 0%, transparent 50%),
+                radial-gradient(circle at 70% 30%, rgba(198,0,84,0.12) 0%, transparent 50%);
+    animation: hero-pulse 8s ease-in-out infinite;
+  }
+  @keyframes hero-pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+  .hero h1 { font-size: 2.4em; font-weight: 700; position: relative; z-index: 1; letter-spacing: -0.02em; }
+  .hero h1 span.up { color: #60A5FA; }
+  .hero h1 span.vs { color: #94A3B8; margin: 0 12px; font-weight: 300; }
+  .hero h1 span.ac { color: #FB7185; }
+  .hero .subtitle { margin-top: 16px; font-size: 1.05em; color: #94A3B8; position: relative; z-index: 1; }
+  .hero .badges { margin-top: 24px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; position: relative; z-index: 1; }
+  .hero .badge { padding: 6px 16px; border-radius: 20px; font-size: 0.8em; font-weight: 600; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: #CBD5E1; }
+
+  .section { max-width: 1200px; margin: 48px auto; padding: 0 40px; }
+  .section h2 { font-size: 1.65em; font-weight: 700; color: var(--text); margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
+  .section h2 .model-tag { font-size: 0.55em; padding: 3px 10px; border-radius: 12px; font-weight: 600; letter-spacing: 0.03em; }
+  .tag-gqa { background: #DBEAFE; color: #1D4ED8; }
+  .tag-mla { background: #EDE9FE; color: #6D28D9; }
+  .tag-sparse { background: #FCE7F3; color: #BE185D; }
+  .tag-compress { background: #FEF3C7; color: #B45309; }
+  .tag-hybrid { background: #D1FAE5; color: #047857; }
+  .section .desc { color: var(--text-sec); font-size: 0.95em; margin-bottom: 24px; }
+
+  .comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 28px; }
+  .card { background: var(--card); border-radius: 12px; padding: 24px; border: 1px solid var(--border); box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+  .card.upstream { border-left: 4px solid var(--upstream); }
+  .card.ascend { border-left: 4px solid var(--ascend); }
+  .card h3 { font-size: 1.1em; font-weight: 700; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+  .card.upstream h3 { color: var(--upstream); }
+  .card.ascend h3 { color: var(--ascend); }
+  .card .shape-code { font-family: 'JetBrains Mono', 'Cascadia Code', 'Consolas', monospace; background: #F1F5F9; padding: 2px 8px; border-radius: 4px; font-size: 0.92em; color: var(--text); white-space: nowrap; }
+  .card .api { font-size: 0.82em; color: var(--text-sec); margin-top: 2px; }
+  .card .meta { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; }
+  .card .meta-item { font-size: 0.8em; color: var(--text-sec); display: flex; align-items: center; gap: 4px; }
+  .card .meta-item .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+
+  .diagram { margin-top: 16px; background: #FAFBFC; border-radius: 8px; border: 1px solid #E2E8F0; overflow: hidden; }
+  .diagram svg { display: block; width: 100%; height: auto; }
+
+  .insight { margin-top: 20px; padding: 16px 20px; background: var(--gap-light); border-left: 4px solid var(--gap); border-radius: 0 8px 8px 0; font-size: 0.92em; }
+  .insight strong { color: var(--gap); }
+  .insight ul { margin: 6px 0 0 18px; }
+  .insight li { margin: 3px 0; }
+
+  .summary-table { width: 100%; border-collapse: collapse; margin-top: 24px; font-size: 0.88em; background: var(--card); border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+  .summary-table th { background: #1E293B; color: white; padding: 12px 14px; text-align: left; font-weight: 600; font-size: 0.85em; letter-spacing: 0.03em; }
+  .summary-table td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .summary-table tr:last-child td { border-bottom: none; }
+  .summary-table .up-cell { background: var(--upstream-bg); }
+  .summary-table .ac-cell { background: var(--ascend-bg); }
+  .summary-table .gap-cell { color: var(--gap); font-weight: 700; text-align: center; font-size: 1.1em; }
+
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin: 12px 0 4px; font-size: 0.78em; color: var(--text-sec); }
+  .legend span { display: flex; align-items: center; gap: 5px; }
+  .legend .swatch { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+
+  @media (max-width: 900px) {
+    .comparison { grid-template-columns: 1fr; }
+    .section { padding: 0 16px; }
+    .hero { padding: 40px 20px 36px; }
+    .hero h1 { font-size: 1.5em; }
+    .summary-table { font-size: 0.72em; }
+    .summary-table th, .summary-table td { padding: 6px 8px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════ HERO ═══════════════════ -->
+<div class="hero">
+  <h1><span class="up">vLLM</span><span class="vs">vs</span><span class="ac">vLLM-Ascend</span></h1>
+  <div class="subtitle">KV Cache Token 级存储对比 — 从 Block 到 Byte 的完整拆解</div>
+  <div class="badges">
+    <span class="badge">GQA</span> <span class="badge">Standard MLA (DS V3.1)</span>
+    <span class="badge">Sparse MLA (DS V3.2)</span> <span class="badge">Compress MLA (DS V4)</span>
+    <span class="badge">Hybrid (Qwen3.5)</span>
+  </div>
+</div>
+
+<!-- ═══════════════════ PRIMER ═══════════════════ -->
+<div class="section">
+  <h2>📐 基础概念：Block × Token × Byte</h2>
+  <p class="desc">在深入各模型之前，先统一六个贯穿全文的维度符号。KV Cache 本质上是 <strong>N 个 Block，每个 Block 包含 B 个 Token，每个 Token 是一段连续的字节</strong>。</p>
+
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(170px,1fr)); gap:12px; margin:16px 0;">
+    <div style="background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px;">
+      <div style="font-size:1.4em; font-weight:800; color:#2563EB;">N</div>
+      <div style="font-size:0.85em; color:var(--text-sec);">num_blocks</div>
+      <div style="font-size:0.78em; color:#94A3B8; margin-top:2px;">物理 block 数量<br>available_memory / page_size_bytes</div>
+    </div>
+    <div style="background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px;">
+      <div style="font-size:1.4em; font-weight:800; color:#7C3AED;">B</div>
+      <div style="font-size:0.85em; color:var(--text-sec);">block_size</div>
+      <div style="font-size:0.78em; color:#94A3B8; margin-top:2px;">每 block 的 token 数<br>典型值: 16 / 32 / 64</div>
+    </div>
+    <div style="background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px;">
+      <div style="font-size:1.4em; font-weight:800; color:#059669;">H</div>
+      <div style="font-size:0.85em; color:var(--text-sec);">num_kv_heads</div>
+      <div style="font-size:0.78em; color:#94A3B8; margin-top:2px;">KV head 数量<br>GQA: 8 | MLA: 1</div>
+    </div>
+    <div style="background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px;">
+      <div style="font-size:1.4em; font-weight:800; color:#DC2626;">D</div>
+      <div style="font-size:0.85em; color:var(--text-sec);">head_size</div>
+      <div style="font-size:0.78em; color:#94A3B8; margin-top:2px;">每 head 的维度<br>GQA: 128 | MLA: 576</div>
+    </div>
+    <div style="background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px;">
+      <div style="font-size:1.4em; font-weight:800; color:#C60054;">T</div>
+      <div style="font-size:0.85em; color:var(--text-sec);">num_tensors</div>
+      <div style="font-size:0.78em; color:#94A3B8; margin-top:2px;">每层独立 tensor 数<br>上游: 始终 1 | Ascend: 1~4</div>
+    </div>
+    <div style="background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px;">
+      <div style="font-size:1.4em; font-weight:800; color:#D97706;">P</div>
+      <div style="font-size:0.85em; color:var(--text-sec);">page_size_bytes</div>
+      <div style="font-size:0.78em; color:#94A3B8; margin-top:2px;">每 page(block) 字节数<br>= B × H × D × dtype_size × factor</div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <strong>颜色图例：</strong>
+    <span><span class="swatch" style="background:var(--k-color)"></span> K / key</span>
+    <span><span class="swatch" style="background:var(--v-color)"></span> V / value</span>
+    <span><span class="swatch" style="background:var(--nope-color)"></span> kv_lora / NoPE</span>
+    <span><span class="swatch" style="background:var(--rope-color)"></span> k_rope / RoPE</span>
+    <span><span class="swatch" style="background:var(--scale-color)"></span> Scale / 量化元数据</span>
+    <span><span class="swatch" style="background:var(--indexer-color)"></span> Indexer K / 稀疏索引</span>
+    <span><span class="swatch" style="background:var(--padding-color)"></span> Padding</span>
+  </div>
+</div>
+
+<!-- ═══════════════════ GQA ═══════════════════ -->
+<div class="section">
+  <h2>1. GQA <span class="model-tag tag-gqa">标准注意力</span></h2>
+  <p class="desc">代表模型：Qwen3 MoE、Llama 系列。每个 token 有 H 个 KV head，每个 head D 维。K 和 V 是两套独立的投影矩阵，但上游把它们交织存放在同一个 tensor 中。</p>
+
+  <div class="comparison">
+    <div class="card upstream">
+      <h3>🔵 上游 vLLM — 单 Tensor，K/V 交织</h3>
+      <span class="shape-code">(2, N, B, H, D)</span>
+      <span class="api">FlashAttentionBackend.get_kv_cache_shape()</span>
+      <div class="meta">
+        <span class="meta-item"><span class="dot" style="background:var(--k-color)"></span> K 区域 (dim=0, index=0)</span>
+        <span class="meta-item"><span class="dot" style="background:var(--v-color)"></span> V 区域 (dim=0, index=1)</span>
+        <span class="meta-item"><strong>1</strong> tensor/层</span>
+        <span class="meta-item">Reshape: <code>view(dtype).view(2,N,B,H,D)</code></span>
+      </div>
+      <div class="diagram">
+        <svg viewBox="0 0 800 300" xmlns="http://www.w3.org/2000/svg">
+          <defs><pattern id="kg" width="12" height="12" patternUnits="userSpaceOnUse"><rect width="12" height="12" fill="#DBEAFE"/><rect width="6" height="6" fill="#93C5FD"/></pattern><pattern id="vg" width="12" height="12" patternUnits="userSpaceOnUse"><rect width="12" height="12" fill="#FEE2E2"/><rect width="6" height="6" fill="#FCA5A5"/></pattern></defs>
+          <text x="20" y="22" font-size="13" font-weight="700" fill="#1E40AF">单个 Tensor：K 和 V 在 dim=0 交织</text>
+          <rect x="20" y="36" width="760" height="90" rx="4" fill="none" stroke="#2563EB" stroke-width="2.5"/>
+          <rect x="22" y="38" width="756" height="41" rx="3" fill="url(#kg)" opacity="0.5"/>
+          <text x="400" y="63" text-anchor="middle" font-size="13" font-weight="700" fill="#1E40AF">K cache: 所有 token 的 Key — index [0]</text>
+          <rect x="22" y="81" width="756" height="41" rx="3" fill="url(#vg)" opacity="0.5"/>
+          <text x="400" y="106" text-anchor="middle" font-size="13" font-weight="700" fill="#991B1B">V cache: 所有 token 的 Value — index [1]</text>
+          <text x="20" y="156" font-size="13" font-weight="700" fill="#1E293B">单个 Block 内部（B=16, H=8, D=128, bf16）：</text>
+          <rect x="20" y="168" width="760" height="48" rx="4" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1"/>
+          <rect x="20" y="168" width="48" height="48" rx="4" fill="#E2E8F0"/><text x="44" y="197" text-anchor="middle" font-size="11" font-weight="600" fill="#64748B">K[0]</text>
+          <rect x="72" y="170" width="40" height="22" rx="3" fill="#DBEAFE" stroke="#93C5FD" stroke-width="0.8"/><text x="92" y="185" text-anchor="middle" font-size="8" fill="#1E40AF">tok₀</text>
+          <rect x="116" y="170" width="40" height="22" rx="3" fill="#DBEAFE" stroke="#93C5FD" stroke-width="0.8"/><text x="136" y="185" text-anchor="middle" font-size="8" fill="#1E40AF">tok₁</text>
+          <text x="172" y="185" font-size="11" fill="#94A3B8">···</text>
+          <rect x="196" y="170" width="40" height="22" rx="3" fill="#DBEAFE" stroke="#93C5FD" stroke-width="0.8"/><text x="216" y="185" text-anchor="middle" font-size="8" fill="#1E40AF">tok₁₅</text>
+          <text x="258" y="185" font-size="10" fill="#64748B">每 token = H₀·D₀₋₁₂₇ ... H₇·D₀₋₁₂₇ = 1024 elem = 2048 B (bf16)</text>
+          <rect x="20" y="193" width="48" height="23" rx="4" fill="#E2E8F0"/><text x="44" y="209" text-anchor="middle" font-size="11" font-weight="600" fill="#64748B">V[1]</text>
+          <rect x="72" y="195" width="40" height="14" rx="2" fill="#FEE2E2" stroke="#FCA5A5" stroke-width="0.6"/><text x="92" y="206" text-anchor="middle" font-size="7" fill="#991B1B">tok₀</text>
+          <rect x="116" y="195" width="40" height="14" rx="2" fill="#FEE2E2" stroke="#FCA5A5" stroke-width="0.6"/><text x="160" y="206" font-size="9" fill="#94A3B8">··· tok₁₅</text>
+          <text x="20" y="248" font-size="12" fill="#1E40AF" font-weight="600">▸ CUDA kernel 内部：</text>
+          <text x="180" y="248" font-size="11" fill="#475569" font-family="monospace">k_ptr = kv_cache + block_id * stride; v_ptr = kv_cache + block_id * stride + K_offset</text>
+          <text x="20" y="270" font-size="11" fill="#64748B">▸ K 和 V 共享同一个 base pointer。block 内连续存放，指针偏移即可区分。model_runner 仅需 1 行 view()。</text>
+          <text x="20" y="292" font-size="11" fill="#64748B">▸ 单个 Token 存储结构：<tspan font-family="monospace" fill="#1E40AF">K: H×D elem → V: H×D elem</tspan>，同一 buffer 内 K 区在前 V 区在后。</text>
+        </svg>
+      </div>
+    </div>
+    <div class="card ascend">
+      <h3>🔴 vLLM-Ascend — 两个独立 Tensor</h3>
+      <span class="shape-code">(2, N, B, H, D) → 拆为 K:(N,B,H,D) + V:(N,B,H,D)</span>
+      <span class="api">AscendAttentionBackend.get_kv_cache_shape()</span>
+      <div class="meta">
+        <span class="meta-item"><span class="dot" style="background:var(--k-color)"></span> k_buffer (独立 int8)</span>
+        <span class="meta-item"><span class="dot" style="background:var(--v-color)"></span> v_buffer (独立 int8)</span>
+        <span class="meta-item"><strong>2</strong> tensors/层</span>
+        <span class="meta-item">Reshape: <code>k.view(N,B,H,D) + v.view(N,B,H,D)</code></span>
+      </div>
+      <div class="diagram">
+        <svg viewBox="0 0 800 290" xmlns="http://www.w3.org/2000/svg">
+          <text x="20" y="22" font-size="13" font-weight="700" fill="#9D174D">两个独立分配的 int8 Buffer — NPU DMA 要求物理连续</text>
+          <rect x="20" y="36" width="760" height="52" rx="4" fill="none" stroke="#C60054" stroke-width="2" stroke-dasharray="6,2"/>
+          <rect x="22" y="38" width="756" height="48" rx="3" fill="url(#kg)" opacity="0.4"/>
+          <text x="400" y="57" text-anchor="middle" font-size="13" font-weight="700" fill="#9D174D">k_buffer = torch.zeros(N×B×H×D × 2B, dtype=int8) — 独立物理地址</text>
+          <text x="400" y="76" text-anchor="middle" font-size="11" fill="#9D174D">仅包含 K 数据。view(bf16).view(N, B, H, D) → 传给 NPU kernel 的 K 参数。</text>
+          <rect x="20" y="104" width="760" height="52" rx="4" fill="none" stroke="#C60054" stroke-width="2" stroke-dasharray="6,2"/>
+          <rect x="22" y="106" width="756" height="48" rx="3" fill="url(#vg)" opacity="0.4"/>
+          <text x="400" y="125" text-anchor="middle" font-size="13" font-weight="700" fill="#9D174D">v_buffer = torch.zeros(N×B×H×D × 2B, dtype=int8) — 独立物理地址</text>
+          <text x="400" y="144" text-anchor="middle" font-size="11" fill="#9D174D">仅包含 V 数据。view(bf16).view(N, B, H, D) → 传给 NPU kernel 的 V 参数。</text>
+          <rect x="20" y="172" width="760" height="44" rx="4" fill="#FCE7F3" stroke="#F9A8D4" stroke-width="1"/>
+          <text x="400" y="192" text-anchor="middle" font-size="12" font-weight="600" fill="#9D174D">NPU kernel 调用</text>
+          <text x="400" y="210" text-anchor="middle" font-size="11" font-family="monospace" fill="#831843">aclnnFlashAttention(k_cache, v_cache, ...)</text>
+          <text x="20" y="242" font-size="12" fill="#9D174D" font-weight="600">▸ 为什么必须拆分？</text>
+          <text x="20" y="264" font-size="11" fill="#64748B">NPU DMA Engine 只接受 {base_addr, length}，不支持 stride/offset 参数。每个 kernel 参数 = 一段物理连续内存。</text>
+          <text x="20" y="284" font-size="11" fill="#64748B">▸ 差距：★ — 仅多 1 个 tensor。Backend shape (2,N,B,H,D) 语义完整，model_runner 只是机械地将 dim=0 拆为两个 buffer。</text>
+        </svg>
+      </div>
+    </div>
+  </div>
+  <div class="insight">
+    <strong>🔑 关键差异：</strong>
+    <ul>
+      <li><strong>上游</strong>：<code>kv_cache[0]</code>=K, <code>kv_cache[1]</code>=V，同一块物理内存内通过指针偏移区分 → 1 个 tensor</li>
+      <li><strong>Ascend</strong>：NPU DMA 不接受 stride → K 和 V 必须各自独立分配 → 2 个 tensor</li>
+      <li><strong>信息丢失</strong>：<strong>无</strong>。Backend 返回的 (2,N,B,H,D) 语义完整，model_runner 仅机械拆分 dim=0。</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ═══════════════════ STANDARD MLA ═══════════════════ -->
+<div class="section">
+  <h2>2. 标准 MLA <span class="model-tag tag-mla">DeepSeek V3.1</span></h2>
+  <p class="desc">MLA 将多头 KV 压缩为一个 latent vector，num_kv_heads=1（单虚拟头）。head_size=576 实际是 kv_lora(512) + k_rope(64) 在同一维度的拼接——这是 MLA 存储的核心：<strong>两个语义独立的组件在最后一个维度平面存放</strong>。</p>
+
+  <div class="comparison">
+    <div class="card upstream">
+      <h3>🔵 上游 vLLM — 单 Tensor，平面拼接</h3>
+      <span class="shape-code">(N, B, 576)</span>
+      <span class="api">MLACommonBackend.get_kv_cache_shape()</span>
+      <div class="meta">
+        <span class="meta-item"><span class="dot" style="background:var(--nope-color)"></span> kv_lora (512)</span>
+        <span class="meta-item"><span class="dot" style="background:var(--rope-color)"></span> k_rope (64)</span>
+        <span class="meta-item"><strong>1</strong> tensor/层</span>
+        <span class="meta-item">Reshape: <code>view(N,B,576)</code> 1行</span>
+      </div>
+      <div class="diagram">
+        <svg viewBox="0 0 800 360" xmlns="http://www.w3.org/2000/svg">
+          <text x="20" y="22" font-size="13" font-weight="700" fill="#1E40AF">单个 Tensor：(N, B, 576) — 每 token 的 kv_lora + k_rope 在最后一维平面拼接</text>
+          <text x="20" y="50" font-size="12" fill="#475569">Block 布局（N blocks，每个 B tokens，同一 block 内 tokens 连续存放）：</text>
+          <rect x="20" y="62" width="760" height="76" rx="4" fill="#F1F5F9" stroke="#CBD5E1" stroke-width="1"/>
+          <rect x="20" y="62" width="60" height="76" rx="4" fill="#E2E8F0"/><text x="50" y="104" text-anchor="middle" font-size="11" font-weight="600" fill="#64748B">Block 0</text>
+          <rect x="84" y="64" width="55" height="34" rx="3" fill="white" stroke="#CBD5E1" stroke-width="0.8"/><text x="111" y="78" text-anchor="middle" font-size="9" fill="#64748B">Token 0</text><text x="111" y="92" text-anchor="middle" font-size="8" fill="#94A3B8">576 elem</text>
+          <rect x="143" y="64" width="55" height="34" rx="3" fill="white" stroke="#CBD5E1" stroke-width="0.8"/><text x="170" y="78" text-anchor="middle" font-size="9" fill="#64748B">Token 1</text><text x="170" y="92" text-anchor="middle" font-size="8" fill="#94A3B8">576 elem</text>
+          <text x="220" y="86" font-size="14" fill="#94A3B8">···</text>
+          <rect x="248" y="64" width="55" height="34" rx="3" fill="white" stroke="#CBD5E1" stroke-width="0.8"/><text x="275" y="78" text-anchor="middle" font-size="9" fill="#64748B">Token B-1</text><text x="275" y="92" text-anchor="middle" font-size="8" fill="#94A3B8">576 elem</text>
+          <text x="340" y="86" font-size="12" fill="#64748B">每 token = 576 element × 2B = 1152 B (bf16)</text>
+          <text x="340" y="106" font-size="12" fill="#64748B">Block 0 = B × 1152 B。Block 间连续，index = block_id × B × 1152</text>
+
+          <text x="20" y="168" font-size="12" font-weight="700" fill="#1E293B">单个 Token 的 576 维拆解（上游视角 — kernel 内部 offset 切分）：</text>
+          <rect x="20" y="182" width="760" height="50" rx="4" fill="none" stroke="#2563EB" stroke-width="2"/>
+          <rect x="21" y="183" width="675" height="48" rx="3" fill="#EDE9FE" opacity="0.5"/>
+          <text x="358" y="201" text-anchor="middle" font-size="12" font-weight="700" fill="#6D28D9">kv_lora (NoPE) — 512 维 · bf16</text>
+          <text x="358" y="220" text-anchor="middle" font-size="10" fill="#7C3AED">dim offset [0:512) — kernel 内部指针基址 +0</text>
+          <rect x="698" y="183" width="81" height="48" rx="3" fill="#FEF3C7" opacity="0.5"/>
+          <text x="738" y="201" text-anchor="middle" font-size="11" font-weight="700" fill="#B45309">k_rope</text>
+          <text x="738" y="218" text-anchor="middle" font-size="9" fill="#B45309">64D · bf16</text>
+          <text x="738" y="232" text-anchor="middle" font-size="8" fill="#B45309">[512:576)</text>
+
+          <text x="20" y="262" font-size="12" fill="#1E40AF" font-weight="600">▸ CUDA FlashMLA kernel 内部：</text>
+          <text x="20" y="284" font-size="11" fill="#475569" font-family="monospace">  nope = kv_cache[:, :, 0:512]      ← 前 512 维做 attention</text>
+          <text x="20" y="302" font-size="11" fill="#475569" font-family="monospace">  rope = kv_cache[:, :, 512:576]    ← 后 64 维做 RoPE</text>
+          <text x="20" y="324" font-size="11" fill="#64748B">▸ model_runner 完全不知道 576 = 512 + 64。这个知识只在 Backend 和 kernel 之间共享。</text>
+          <text x="20" y="346" font-size="11" fill="#64748B">▸ Reshape 只需 1 行：<tspan font-family="monospace" fill="#475569">kv_cache = raw_tensor.view(dtype).view(N, B, 576)</tspan></text>
+        </svg>
+      </div>
+    </div>
+    <div class="card ascend">
+      <h3>🔴 vLLM-Ascend — 两个独立 Tensor</h3>
+      <span class="shape-code">(N, B, 1, 576) → 查 layer 拆为 (N,B,1,512) + (N,B,1,64)</span>
+      <span class="api">AscendMLABackend.get_kv_cache_shape()</span>
+      <div class="meta">
+        <span class="meta-item"><span class="dot" style="background:var(--nope-color)"></span> k_cache (nope)</span>
+        <span class="meta-item"><span class="dot" style="background:var(--rope-color)"></span> v_cache (rope)</span>
+        <span class="meta-item"><strong>2</strong> tensors/层</span>
+        <span class="meta-item">⚠ model_runner 查 layer 获取拆分点</span>
+      </div>
+      <div class="diagram">
+        <svg viewBox="0 0 800 360" xmlns="http://www.w3.org/2000/svg">
+          <text x="20" y="22" font-size="13" font-weight="700" fill="#9D174D">Backend 返回 (N, B, 1, 576) 但 NPU kernel 需要两个独立 tensor</text>
+          <rect x="20" y="36" width="760" height="40" rx="4" fill="#FCE7F3" stroke="#F9A8D4" stroke-width="1"/>
+          <text x="400" y="60" text-anchor="middle" font-size="12" fill="#831843">Backend 返回：(N, B, 1, 576) — 这只是"参考 shape"，不直接用于分配</text>
+          <text x="400" y="100" text-anchor="middle" font-size="15" fill="#C60054">↓ model_runner 绕过 Backend，直接查 attention layer 获取拆分信息 ↓</text>
+          <rect x="20" y="114" width="760" height="60" rx="4" fill="none" stroke="#C60054" stroke-width="2"/>
+          <rect x="21" y="115" width="674" height="58" rx="3" fill="#EDE9FE" opacity="0.4"/>
+          <text x="358" y="135" text-anchor="middle" font-size="13" font-weight="700" fill="#6D28D9">k_cache (nope_cache)</text>
+          <text x="358" y="155" text-anchor="middle" font-size="11" fill="#7C3AED">shape: (N, B, 1, 512) — kv_lora_rank=512 来自 attention layer</text>
+          <text x="358" y="170" text-anchor="middle" font-size="9" fill="#7C3AED">独立 int8 buffer #1 → view(bf16) → view(N,B,1,512)</text>
+          <rect x="697" y="115" width="82" height="58" rx="3" fill="#FEF3C7" opacity="0.4"/>
+          <text x="738" y="135" text-anchor="middle" font-size="13" font-weight="700" fill="#B45309">v_cache</text>
+          <text x="738" y="155" text-anchor="middle" font-size="11" fill="#B45309">(N,B,1,64)</text>
+          <text x="738" y="170" text-anchor="middle" font-size="9" fill="#B45309">buffer #2</text>
+
+          <rect x="20" y="192" width="760" height="60" rx="4" fill="#FEF2F2" stroke="#FECACA" stroke-width="1"/>
+          <text x="32" y="212" font-size="12" font-weight="700" fill="#DC2626">⚠ 信息丢失：Backend 不知道 576 = 512 + 64 怎么拆</text>
+          <text x="32" y="232" font-size="11" fill="#991B1B">get_kv_cache_shape() 是 static method，拿不到 attention layer 实例的 kv_lora_rank / qk_rope_head_dim。</text>
+          <text x="32" y="250" font-size="11" fill="#991B1B">Backend 返回的 576 告诉 model_runner "总大小"，但不说 "哪部分是 kv_lora，哪部分是 k_rope"。</text>
+
+          <text x="20" y="278" font-size="12" fill="#9D174D" font-weight="600">▸ model_runner 被迫自己查 layer：</text>
+          <text x="20" y="300" font-size="11" fill="#475569" font-family="monospace">  k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, spec)</text>
+          <text x="20" y="320" font-size="11" fill="#475569" font-family="monospace">  k_shape = (N, B, 1, k_dim)  # 512 ← 来自 attention layer，不来自 Backend</text>
+          <text x="20" y="340" font-size="11" fill="#475569" font-family="monospace">  v_shape = (N, B, 1, v_dim)  # 64  ← 同理</text>
+          <text x="20" y="358" font-size="11" fill="#9D174D">NPU kernel: <tspan font-family="monospace" fill="#831843">npu_kv_rmsnorm_rope_cache(ckv_cache=k_cache, kcache=v_cache, ...)</tspan></text>
+        </svg>
+      </div>
+    </div>
+  </div>
+  <div class="insight">
+    <strong>🔑 关键差异：</strong>
+    <ul>
+      <li><strong>上游</strong>：576=512+64，但 model_runner 不知道也不关心。拿到 (N,B,576) 直接 view，kernel 内部 offset 切分。</li>
+      <li><strong>Ascend</strong>：Backend 返回 (N,B,1,576) → model_runner <strong>绕过 Backend 直接查 attention layer</strong> 获取 kv_lora_rank=512 和 qk_rope_head_dim=64 → 拆为两个独立 tensor。</li>
+      <li><strong>差距</strong>：★★ — head_size=576 的拆分信息丢失。Backend 的 static method 接口物理上拿不到这些参数。</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ═══════════════════ SPARSE MLA ═══════════════════ -->
+<div class="section">
+  <h2>3. Sparse MLA <span class="model-tag tag-sparse">DeepSeek V3.2 · bf16 + fp8 C8</span></h2>
+  <p class="desc">DS V3.2 在标准 MLA 基础上增加了 Sparse Attention Indexer——需要额外存储 indexer 的 K。上游用 656B 的 opaque blob（kernel 私有格式）封装一切；Ascend 拆为 3~4 个独立 tensor，且 tensor 数量 <strong>非单调</strong>（bf16→3, C8 A3→4, C8 A5→3）。</p>
+
+  <div class="comparison">
+    <div class="card upstream">
+      <h3>🔵 上游 vLLM — 单 Tensor，656B Opaque Blob</h3>
+      <span class="shape-code">(N, B, 656)  ← 最后一维是字节布局，不是 head_size！</span>
+      <span class="api">FlashMLASparseBackend.get_kv_cache_shape()</span>
+      <div class="meta">
+        <span class="meta-item"><span class="dot" style="background:var(--nope-color)"></span> NoPE fp8 (512B)</span>
+        <span class="meta-item"><span class="dot" style="background:var(--scale-color)"></span> Scale fp32 (16B)</span>
+        <span class="meta-item"><span class="dot" style="background:var(--rope-color)"></span> RoPE bf16 (128B)</span>
+        <span class="meta-item"><strong>1</strong> tensor/层</span>
+        <span class="meta-item">Reshape: <code>view(uint8)</code> 1行</span>
+      </div>
+      <div class="diagram">
+        <svg viewBox="0 0 800 290" xmlns="http://www.w3.org/2000/svg">
+          <text x="20" y="22" font-size="13" font-weight="700" fill="#1E40AF">单个 Tensor：(N, B, 656) — 每 token 的 656 字节私有格式 (fp8_ds_mla)</text>
+          <text x="20" y="52" font-size="12" fill="#475569">单个 Token = 656 字节 — Kernel 的私有字节布局：</text>
+          <rect x="20" y="64" width="760" height="56" rx="4" fill="none" stroke="#2563EB" stroke-width="2"/>
+          <rect x="21" y="65" width="596" height="54" rx="3" fill="#EDE9FE" opacity="0.5"/>
+          <text x="319" y="83" text-anchor="middle" font-size="12" font-weight="700" fill="#6D28D9">NoPE (fp8)</text>
+          <text x="319" y="100" text-anchor="middle" font-size="10" fill="#7C3AED">512 bytes = 512 × float8_e4m3fn · byte offset [0:512)</text>
+          <rect x="619" y="65" width="40" height="54" rx="3" fill="#D1FAE5" opacity="0.5"/>
+          <text x="639" y="97" text-anchor="middle" font-size="11" font-weight="700" fill="#047857">Scale</text>
+          <text x="639" y="112" text-anchor="middle" font-size="8" fill="#047857">f32×4</text>
+          <rect x="661" y="65" width="118" height="54" rx="3" fill="#FEF3C7" opacity="0.5"/>
+          <text x="720" y="83" text-anchor="middle" font-size="12" font-weight="700" fill="#B45309">RoPE (bf16)</text>
+          <text x="720" y="100" text-anchor="middle" font-size="10" fill="#B45309">128B = 64 × bf16</text>
+          <text x="20" y="134" font-size="10" fill="#94A3B8">  0                        512         528              656</text>
+
+          <text x="20" y="164" font-size="12" fill="#1E40AF" font-weight="600">▸ CUDA kernel 内部：</text>
+          <text x="20" y="186" font-size="11" fill="#475569" font-family="monospace">  k_cache = kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2)</text>
+          <text x="20" y="206" font-size="11" fill="#64748B">→ 整个 buffer 当原始字节流传给 kernel。kernel 内部知道 656 = NoPE(512) + Scale(16) + RoPE(128)。</text>
+
+          <rect x="20" y="228" width="760" height="46" rx="4" fill="#DBEAFE" stroke="#93C5FD" stroke-width="1"/>
+          <text x="32" y="248" font-size="11" font-weight="700" fill="#1E40AF">设计原则：Backend 的私有协议</text>
+          <text x="32" y="268" font-size="11" fill="#1D4ED8">656 是 FlashMLASparseBackend 的内部约定。model_runner 只知道 page_size_bytes = B × 656，完全不知道内部怎么拆。</text>
+        </svg>
+      </div>
+    </div>
+    <div class="card ascend">
+      <h3>🔴 vLLM-Ascend — 3~4 个独立 Tensor，非单调</h3>
+      <span class="shape-code">(N, B, 1, 576) → 拆为 3 (bf16) 或 4 (C8 A3) 或 3 (C8 A5)</span>
+      <span class="api">AscendSFABackend.get_kv_cache_shape()</span>
+      <div class="meta">
+        <span class="meta-item"><span class="dot" style="background:var(--nope-color)"></span> kv_lora</span>
+        <span class="meta-item"><span class="dot" style="background:var(--rope-color)"></span> k_rope</span>
+        <span class="meta-item"><span class="dot" style="background:var(--indexer-color)"></span> indexer K</span>
+        <span class="meta-item"><span class="dot" style="background:var(--scale-color)"></span> indexer Scale</span>
+        <span class="meta-item">⚠ 3~4 tensors/层</span>
+      </div>
+      <div class="diagram">
+        <svg viewBox="0 0 800 360" xmlns="http://www.w3.org/2000/svg">
+          <text x="20" y="22" font-size="13" font-weight="700" fill="#9D174D">Backend 返回 (N, B, 1, 576) — 和标准 MLA <tspan font-weight="800">完全相同</tspan>！NPU kernel 需要 3~4 个独立 tensor</text>
+
+          <text x="20" y="52" font-size="12" font-weight="600" fill="#475569">bf16 Sparse MLA（无 C8 量化）— 3 个独立 int8 buffer：</text>
+          <rect x="20" y="64" width="240" height="54" rx="4" fill="#EDE9FE" stroke="#A78BFA" stroke-width="1.5"/>
+          <text x="140" y="82" text-anchor="middle" font-size="11" font-weight="700" fill="#6D28D9">kv_cache[0]</text>
+          <text x="140" y="98" text-anchor="middle" font-size="9" fill="#7C3AED">kv_lora (bf16) · (N,B,1,512)</text>
+          <text x="140" y="112" text-anchor="middle" font-size="9" fill="#7C3AED">np_kv_rmsnorm_rope_cache</text>
+          <rect x="276" y="64" width="160" height="54" rx="4" fill="#FEF3C7" stroke="#FBBF24" stroke-width="1.5"/>
+          <text x="356" y="82" text-anchor="middle" font-size="11" font-weight="700" fill="#B45309">kv_cache[1]</text>
+          <text x="356" y="98" text-anchor="middle" font-size="9" fill="#B45309">k_rope (bf16) · (N,B,1,64)</text>
+          <text x="356" y="112" text-anchor="middle" font-size="9" fill="#B45309">np_kv_rmsnorm_rope_cache</text>
+          <rect x="452" y="64" width="240" height="54" rx="4" fill="#FCE7F3" stroke="#F472B6" stroke-width="1.5"/>
+          <text x="572" y="82" text-anchor="middle" font-size="11" font-weight="700" fill="#BE185D">kv_cache[2]</text>
+          <text x="572" y="98" text-anchor="middle" font-size="9" fill="#BE185D">indexer_k (int8) · (N,B,1,128)</text>
+          <text x="572" y="112" text-anchor="middle" font-size="9" fill="#BE185D">Lightning_indexer_quant</text>
+
+          <text x="20" y="146" font-size="12" font-weight="600" fill="#475569">C8 量化 · A3 设备 — 增加第 4 个 tensor：</text>
+          <rect x="20" y="158" width="220" height="36" rx="4" fill="#EDE9FE" stroke="#A78BFA" stroke-width="1" opacity="0.5"/>
+          <rect x="248" y="158" width="160" height="36" rx="4" fill="#FEF3C7" stroke="#FBBF24" stroke-width="1" opacity="0.5"/>
+          <rect x="416" y="158" width="160" height="36" rx="4" fill="#FCE7F3" stroke="#F472B6" stroke-width="1" opacity="0.5"/>
+          <rect x="592" y="158" width="188" height="36" rx="4" fill="#D1FAE5" stroke="#34D399" stroke-width="1.5"/>
+          <text x="686" y="180" text-anchor="middle" font-size="10" font-weight="700" fill="#047857">kv_cache[3]</text>
+          <text x="686" y="192" text-anchor="middle" font-size="8" fill="#047857">indexer_scale (fp16) · (N,B,1,1)</text>
+
+          <text x="20" y="220" font-size="12" font-weight="600" fill="#475569">C8 量化 · A5 设备 — CKV 合并，回到 3 个 tensor：</text>
+          <text x="20" y="240" font-size="11" fill="#64748B">  kv_cache[0] = CKV merged (fp8) — kv_lora + k_rope 合并为一个 fp8 tensor（A5 原生支持 fp8）</text>
+          <text x="20" y="256" font-size="11" fill="#64748B">  kv_cache[1] = indexer_k (fp8)     kv_cache[2] = indexer_scale (fp32)</text>
+
+          <rect x="20" y="272" width="760" height="70" rx="4" fill="#FEF2F2" stroke="#FECACA" stroke-width="1"/>
+          <text x="32" y="292" font-size="11" font-weight="700" fill="#DC2626">⚠ 最严重的信息丢失：Backend 返回的 shape 和标准 MLA 完全相同！</text>
+          <text x="32" y="310" font-size="11" fill="#991B1B">tensor 数量 (3vs4)、dtype (int8/fp8/fp16/bf16)、shape (512/64/128/1) — 全部靠 model_runner 的 if-else 推断。</text>
+          <text x="32" y="328" font-size="11" fill="#991B1B">tensor 数量<strong>非单调</strong>：bf16→3, C8 A3→4, C8 A5→3。sparse_kv_cache_ratio 提供 split 比例，但也在 Spec 上而不在 Backend 上。</text>
+        </svg>
+      </div>
+    </div>
+  </div>
+  <div class="insight">
+    <strong>🔑 关键差异：</strong>
+    <ul>
+      <li><strong>上游</strong>：Backend 返回 (N,B,656) 而非 (N,B,576)——<strong>magic number 编码精度信息</strong>。model_runner 视其为 opaque blob。</li>
+      <li><strong>Ascend</strong>：Backend 返回 (N,B,1,576)——和标准 MLA <strong>完全一样</strong>。tensor 数量和形状全由 model_runner 重建。</li>
+      <li><strong>差距</strong>：★★★ — 1/N 信息问题达到极致：1 个返回 shape vs 3~4 个实际 tensor，且组合随精度和硬件变化。</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ═══════════════════ COMPRESS MLA ═══════════════════ -->
+<div class="section">
+  <h2>4. Compress MLA <span class="model-tag tag-compress">DeepSeek V4</span></h2>
+  <p class="desc">DS V4 引入时间压缩（compress_ratio）和独立 Indexer。上游用 584B 私有格式；Ascend 是"复杂度倒挂"的典型——Allocate 最简单（1 个 int8 buffer），Reshape 最复杂（as_strided 承载 3 种语义叠加视图）。</p>
+
+  <div class="comparison">
+    <div class="card upstream">
+      <h3>🔵 上游 vLLM — 单 Tensor，584B 私有格式</h3>
+      <span class="shape-code">(N, B, 584)  ← V3.2=656 vs V4=584，不同 Backend 子类，不同 magic number</span>
+      <span class="api">DeepseekV4FlashMLASparseBackend.get_kv_cache_shape()</span>
+      <div class="meta">
+        <span class="meta-item"><span class="dot" style="background:var(--nope-color)"></span> NoPE fp8 (448B)</span>
+        <span class="meta-item"><span class="dot" style="background:var(--rope-color)"></span> RoPE bf16 (128B)</span>
+        <span class="meta-item"><span class="dot" style="background:var(--scale-color)"></span> Scale ue8m0 (8B)</span>
+        <span class="meta-item"><strong>1</strong> tensor/层</span>
+        <span class="meta-item">Reshape: <code>view(uint8)</code> 1行</span>
+      </div>
+      <div class="diagram">
+        <svg viewBox="0 0 800 180" xmlns="http://www.w3.org/2000/svg">
+          <text x="20" y="22" font-size="13" font-weight="700" fill="#1E40AF">单 Token = 584 字节（fp8_ds_mla V4 格式）</text>
+          <rect x="20" y="38" width="760" height="56" rx="4" fill="none" stroke="#2563EB" stroke-width="2"/>
+          <rect x="21" y="39" width="500" height="54" rx="3" fill="#EDE9FE" opacity="0.5"/>
+          <text x="271" y="57" text-anchor="middle" font-size="12" font-weight="700" fill="#6D28D9">NoPE (fp8)</text>
+          <text x="271" y="74" text-anchor="middle" font-size="10" fill="#7C3AED">448 bytes = 448 × float8_e4m3fn · byte offset [0:448)</text>
+          <rect x="523" y="39" width="176" height="54" rx="3" fill="#FEF3C7" opacity="0.5"/>
+          <text x="611" y="57" text-anchor="middle" font-size="12" font-weight="700" fill="#B45309">RoPE (bf16)</text>
+          <text x="611" y="74" text-anchor="middle" font-size="10" fill="#B45309">128B = 64 × bf16</text>
+          <rect x="701" y="39" width="78" height="54" rx="3" fill="#D1FAE5" opacity="0.5"/>
+          <text x="740" y="57" text-anchor="middle" font-size="11" font-weight="700" fill="#047857">Scale</text>
+          <text x="740" y="74" text-anchor="middle" font-size="9" fill="#047857">ue8m0×7</text>
+          <text x="20" y="108" font-size="10" fill="#94A3B8">  0                     448                 576   584</text>
+          <rect x="20" y="128" width="760" height="40" rx="4" fill="#DBEAFE" stroke="#93C5FD" stroke-width="1"/>
+          <text x="32" y="148" font-size="11" font-weight="700" fill="#1E40AF">V3.2: (N,B,656)  vs  V4: (N,B,584)  —  不同 Backend 子类，不同 magic number。model_runner 不变：1行 view()。</text>
+          <text x="32" y="164" font-size="10" fill="#1D4ED8">Compress_ratio 影响 token 到 block 的映射（max_memory_usage_bytes），但不影响 per-token 存储维度。</text>
+        </svg>
+      </div>
+    </div>
+    <div class="card ascend">
+      <h3>🔴 vLLM-Ascend — 1 Buffer + as_strided 多重视图</h3>
+      <span class="shape-code">(N, B, 1, head_size) + get_scale_shape() → 1 buffer → 2~3 views</span>
+      <span class="api">AscendDSABackend.get_kv_cache_shape() + get_scale_shape()</span>
+      <div class="meta">
+        <span class="meta-item"><span class="dot" style="background:var(--indexer-color)"></span> view[0]: indexer K</span>
+        <span class="meta-item"><span class="dot" style="background:var(--scale-color)"></span> view[1]: indexer Scale</span>
+        <span class="meta-item"><span class="dot" style="background:var(--nope-color)"></span> view[2]: full overlay (A5)</span>
+        <span class="meta-item">⚠ "复杂度倒挂"</span>
+      </div>
+      <div class="diagram">
+        <svg viewBox="0 0 800 310" xmlns="http://www.w3.org/2000/svg">
+          <text x="20" y="22" font-size="13" font-weight="700" fill="#9D174D">Allocate 最简单（1 个 int8 buffer），Reshape 最复杂（3 个 as_strided overlay views）</text>
+          <rect x="20" y="38" width="760" height="36" rx="4" fill="#F1F5F9" stroke="#CBD5E1" stroke-width="1.5"/>
+          <text x="400" y="60" text-anchor="middle" font-size="12" fill="#475569">Allocate: 1 个 int8 buffer = torch.zeros(total_size, dtype=int8) — 和上游一样简单</text>
+          <text x="400" y="96" text-anchor="middle" font-size="14" fill="#C60054">↓ 但 reshape 需要 as_strided 叠加 3 个视图，每个覆盖 buffer 的不同区域 ↓</text>
+          <rect x="20" y="110" width="760" height="36" rx="4" fill="#FCE7F3" stroke="#F472B6" stroke-width="1.5"/>
+          <text x="400" y="126" text-anchor="middle" font-size="11" fill="#BE185D">view[0]: indexer_k = as_strided(raw, shape=(N,B,1,head_size), stride=...) — 从 buffer 开头，K 视图</text>
+          <text x="400" y="140" text-anchor="middle" font-size="9" fill="#BE185D">覆盖 dim=2 的 [0:head_size) 范围</text>
+          <rect x="20" y="152" width="760" height="36" rx="4" fill="#D1FAE5" stroke="#34D399" stroke-width="1.5"/>
+          <text x="400" y="168" text-anchor="middle" font-size="11" fill="#047857">view[1]: indexer_scale = as_strided(raw, shape=(N,B,1,scale_dim), stride=...) — Scale 视图</text>
+          <text x="400" y="182" text-anchor="middle" font-size="9" fill="#047857">从 buffer 的 head_size 偏移处开始（storage_offset = head_size × dtype_size）</text>
+          <rect x="20" y="196" width="760" height="36" rx="4" fill="#EDE9FE" stroke="#A78BFA" stroke-width="1.5" stroke-dasharray="4,2"/>
+          <text x="400" y="212" text-anchor="middle" font-size="11" fill="#6D28D9">view[2] (A5 only): full_overlay = as_strided(raw, (N,B,1,head_size+scale_dim), ...)</text>
+          <text x="400" y="226" text-anchor="middle" font-size="9" fill="#6D28D9">覆盖 view[0]+view[1] 的全部范围 — A5 设备的 epilog kernel 合并读取路径</text>
+
+          <rect x="20" y="248" width="760" height="52" rx="4" fill="#FEF2F2" stroke="#FECACA" stroke-width="1"/>
+          <text x="32" y="266" font-size="11" font-weight="700" fill="#DC2626">⚠ "复杂度倒挂"：</text>
+          <text x="32" y="284" font-size="11" fill="#991B1B">as_strided 在上游只用于 page padding（通用运行时需求）。在 Ascend 被用于承载模型语义：</text>
+          <text x="32" y="300" font-size="11" fill="#991B1B">compress ratio → 决定 view 数量；KV merge → 决定 view 覆盖范围；A5/A3 → 决定是否叠加 view[2]。</text>
+        </svg>
+      </div>
+    </div>
+  </div>
+  <div class="insight">
+    <strong>🔑 关键差异：</strong>
+    <ul>
+      <li><strong>上游</strong>：584 字节私有格式。V3.2=656 vs V4=584——Backend 子类不同，magic number 不同，model_runner 不变。</li>
+      <li><strong>Ascend</strong>：1 个 int8 buffer 分配最简单（≈上游），但 as_strided 承载 compress_ratio / KV merge / epilog kernel overlay 三种语义。</li>
+      <li><strong>差距</strong>：★★★★ — "复杂度倒挂"。应该由 Layout 层告诉 reshape "这块 buffer 怎么解读"，而不是 reshape 自己推导。</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ═══════════════════ HYBRID ═══════════════════ -->
+<div class="section">
+  <h2>5. Hybrid <span class="model-tag tag-hybrid">Qwen3.5 · Attention + Mamba</span></h2>
+  <p class="desc">Qwen3.5 混合了标准 Attention 和 Mamba (Linear Attention)，两者共享同一块物理 buffer。上游通过 shared_by + as_strided 零拷贝解决；Ascend 需要 manual padding strip + K/V offset 计算。<strong>唯一复用上游 Spec 而不需要 Ascend 万能类的模型，但差距最大。</strong></p>
+
+  <div class="comparison">
+    <div class="card upstream">
+      <h3>🔵 上游 vLLM — 两种 Spec 自然共存</h3>
+      <span class="shape-code">FullAttentionSpec → (2,N,B,H,D)  ·  MambaSpec → own shape</span>
+      <span class="api">shared_by 机制：多层共享 1 个物理 buffer</span>
+      <div class="meta">
+        <span class="meta-item"><span class="dot" style="background:var(--k-color)"></span> Attn 层用 K/V 区域</span>
+        <span class="meta-item"><span class="dot" style="background:var(--rope-color)"></span> Mamba 层用 conv+ssm</span>
+        <span class="meta-item"><strong>1</strong> shared buffer</span>
+        <span class="meta-item">Reshape: <code>as_strided_</code> 零拷贝重排 ~5行</span>
+      </div>
+      <div class="diagram">
+        <svg viewBox="0 0 800 250" xmlns="http://www.w3.org/2000/svg">
+          <text x="20" y="22" font-size="13" font-weight="700" fill="#1E40AF">shared_by 机制：1 个物理 buffer，多个层共享，各自取自己需要的区域</text>
+          <rect x="20" y="40" width="760" height="56" rx="4" fill="#F1F5F9" stroke="#CBD5E1" stroke-width="1.5"/>
+          <text x="400" y="56" text-anchor="middle" font-size="11" fill="#64748B">1 个共享 int8 buffer: torch.zeros(total_size, dtype=int8)</text>
+          <rect x="30" y="66" width="350" height="22" rx="3" fill="#DBEAFE" stroke="#93C5FD" stroke-width="0.8"/>
+          <text x="205" y="81" text-anchor="middle" font-size="10" fill="#1E40AF">Attention 层: K/V cache 区域 — zero copy</text>
+          <rect x="400" y="66" width="370" height="22" rx="3" fill="#FEF3C7" stroke="#FBBF24" stroke-width="0.8"/>
+          <text x="585" y="81" text-anchor="middle" font-size="10" fill="#B45309">Mamba (Linear Attn): conv_state + ssm_state — zero copy</text>
+          <text x="20" y="120" font-size="12" fill="#1E40AF" font-weight="600">▸ K/V 维度交换（零拷贝）：</text>
+          <text x="20" y="142" font-size="11" fill="#475569">GPU kernel 需要 (N, 2, B, H, D) 但存储是 (2, N, B, H, D)</text>
+          <text x="20" y="162" font-size="11" fill="#475569" font-family="monospace">kv_cache = raw.view(dtype).view(2,N,B,H,D).as_strided_((N,2,B,H,D), stride)  </text>
+          <text x="20" y="182" font-size="11" fill="#64748B">→ 零拷贝重排，仅修改 stride 元数据，不分配新内存。~5 行代码，不区分模型类型。</text>
+          <rect x="20" y="202" width="760" height="38" rx="4" fill="#DBEAFE" stroke="#93C5FD" stroke-width="1"/>
+          <text x="32" y="218" font-size="10" fill="#1E40AF">1. shared_by 统一管理 → 不同 Spec 类型在同一 buffer 内各取所需。2. as_strided_ 仅改元数据 → 零拷贝。</text>
+          <text x="32" y="234" font-size="10" fill="#1E40AF">3. 不需要 padding → Mamba 的 conv_state 天然在 buffer 尾部。没有"多余字节"需要处理。</text>
+        </svg>
+      </div>
+    </div>
+    <div class="card ascend">
+      <h3>🔴 vLLM-Ascend — Manual Padding + K/V Offset</h3>
+      <span class="shape-code">复用上游 Spec + page_size_padded → (2,N,B,4,256)</span>
+      <span class="api">AscendAttentionBackend — 但 model_runner 需要 ~100 行 hybrid 专用逻辑</span>
+      <div class="meta">
+        <span class="meta-item"><span class="dot" style="background:var(--padding-color)"></span> conv_padding strip</span>
+        <span class="meta-item"><span class="dot" style="background:var(--k-color)"></span> 手动 K offset</span>
+        <span class="meta-item"><span class="dot" style="background:var(--v-color)"></span> 手动 V offset</span>
+        <span class="meta-item">⚠ 差距 ★★★★★</span>
+      </div>
+      <div class="diagram">
+        <svg viewBox="0 0 800 330" xmlns="http://www.w3.org/2000/svg">
+          <text x="20" y="22" font-size="13" font-weight="700" fill="#9D174D">唯一不需要 AscendMLAAttentionSpec 的模型，但差异全集中在 Reshape</text>
+          <text x="20" y="50" font-size="12" font-weight="600" fill="#475569">Qwen3.5 KV Cache 结构（Ascend）— attention 和 mamba 区域互斥布局：</text>
+          <rect x="20" y="64" width="760" height="48" rx="4" fill="#F1F5F9" stroke="#CBD5E1" stroke-width="1"/>
+          <rect x="30" y="72" width="160" height="16" rx="3" fill="#DBEAFE" stroke="#93C5FD" stroke-width="0.6"/>
+          <text x="110" y="83" text-anchor="middle" font-size="8" fill="#1E40AF">K cache (独立 buffer)</text>
+          <rect x="200" y="72" width="160" height="16" rx="3" fill="#FEE2E2" stroke="#FCA5A5" stroke-width="0.6"/>
+          <text x="280" y="83" text-anchor="middle" font-size="8" fill="#991B1B">V cache (独立 buffer)</text>
+          <rect x="370" y="72" width="180" height="16" rx="3" fill="#FEF3C7" stroke="#FBBF24" stroke-width="0.6"/>
+          <text x="460" y="83" text-anchor="middle" font-size="8" fill="#B45309">Mamba conv/ssm 区域</text>
+          <rect x="560" y="72" width="210" height="16" rx="3" fill="#E2E8F0" stroke="#94A3B8" stroke-width="0.6"/>
+          <text x="665" y="83" text-anchor="middle" font-size="8" fill="#64748B">conv_padding (需手动 strip)</text>
+          <text x="400" y="104" text-anchor="middle" font-size="9" fill="#94A3B8">attention 和 mamba 布局互斥 — 同一个物理 buffer，两个使用者互不知道对方的存在</text>
+
+          <text x="20" y="138" font-size="12" font-weight="700" fill="#DC2626">▸ Ascend 需要 ~100 行 hybrid 专用代码：</text>
+          <text x="20" y="158" font-size="11" fill="#64748B">1. 检测 hybrid_with_attn_and_mamba 标志 → 走单 tensor 路径（不和纯 attention 层共享拆分逻辑）</text>
+          <text x="20" y="176" font-size="11" fill="#64748B">2. strip conv_padding → 手动算偏移量 → 手动算 K 区和 V 区的 byte offset</text>
+          <text x="20" y="194" font-size="11" fill="#64748B">3. split → 组装 tuple → 每个 layer 按角色（attn / mamba / linear_attn）取不同 region</text>
+          <text x="20" y="212" font-size="11" fill="#64748B">4. page_size_padded 强制对齐 → 分配时多算 padding，reshape 时跳过 padding → 内存浪费</text>
+
+          <rect x="20" y="236" width="760" height="76" rx="4" fill="#FEF2F2" stroke="#FECACA" stroke-width="1"/>
+          <text x="32" y="256" font-size="11" font-weight="700" fill="#DC2626">⚠ 最严重的差距 — 这反向证明了问题的根本不在 Spec，而在 Layout：</text>
+          <text x="32" y="276" font-size="11" fill="#991B1B">这是唯一复用上游 Spec (FullAttentionSpec + MambaSpec) 的模型 — Spec 层无差异。</text>
+          <text x="32" y="294" font-size="11" fill="#991B1B">但 Reshape 层的差异却是最大的（★★★★★）— attn 和 mamba 的 layout 互斥，必须手动管理。</text>
+          <text x="32" y="310" font-size="11" fill="#991B1B">如果有一个 KVCacheLayout 层告诉 reshape "这块 buffer 怎么划分"，~100 行可以缩减到 ~10 行。</text>
+        </svg>
+      </div>
+    </div>
+  </div>
+  <div class="insight">
+    <strong>🔑 关键差异：</strong>
+    <ul>
+      <li><strong>上游</strong>：FullAttentionSpec + MambaSpec 两种原生类型 → shared_by 统一管理 → as_strided_ 零拷贝重排 → ~5 行。</li>
+      <li><strong>Ascend</strong>：复用上游 Spec（无需 AscendMLAAttentionSpec！）但需要 page_size_padded + padding strip + 手动 K/V offset → ~100 行。</li>
+      <li><strong>核心启示</strong>：差距根本不在 Spec，而在 <strong>Layout 抽象缺失</strong>。Hybrid 的 attention 和 mamba 各自需要不同布局，但没有任何一层告诉 reshape"这块 buffer 怎么划分"。</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ═══════════════════ SUMMARY TABLE ═══════════════════ -->
+<div class="section">
+  <h2>📊 五模型全景对比</h2>
+  <table class="summary-table">
+    <thead>
+      <tr><th>模型</th><th>上游 vLLM 存储（Token 视角）</th><th>vLLM-Ascend 存储（Token 视角）</th><th>Tensors</th><th>Δ</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="font-weight:700">GQA<br><span style="font-size:0.8em;color:#64748B">Qwen3 MoE</span></td>
+        <td class="up-cell"><code>(2,N,B,H,D)</code> · 1 tensor · dim=0 K/V 交织<br>每 token = H×D 个 K elem + H×D 个 V elem<br>CUDA kernel 指针偏移区分</td>
+        <td class="ac-cell"><code>k_cache: (N,B,H,D)</code> + <code>v_cache: (N,B,H,D)</code><br>2 个独立 int8 buffer · NPU DMA 不接受 stride<br>每 token 的 K 和 V 物理分离</td>
+        <td style="text-align:center">1 → <strong style="color:#C60054">2</strong></td>
+        <td class="gap-cell">★</td>
+      </tr>
+      <tr>
+        <td style="font-weight:700">标准 MLA<br><span style="font-size:0.8em;color:#64748B">DS V3.1</span></td>
+        <td class="up-cell"><code>(N,B,576)</code> · 1 tensor · 平面拼接<br>= kv_lora(512) + k_rope(64)<br>kernel 内 offset 切分，model_runner 不感知</td>
+        <td class="ac-cell"><code>k_nope: (N,B,1,512)</code> + <code>k_rope: (N,B,1,64)</code><br>2 个独立 buffer · Backend 只返回 (N,B,1,576)<br>⚠ model_runner 绕行查 layer 获拆分点</td>
+        <td style="text-align:center">1 → <strong style="color:#C60054">2</strong></td>
+        <td class="gap-cell">★★</td>
+      </tr>
+      <tr>
+        <td style="font-weight:700">Sparse MLA<br><span style="font-size:0.8em;color:#64748B">DS V3.2</span></td>
+        <td class="up-cell"><code>(N,B,656)</code> fp8 · 1 tensor · opaque blob<br>= NoPE(512B) + Scale(16B) + RoPE(128B)<br>magic number 编码精度信息</td>
+        <td class="ac-cell">bf16: kv_lora + k_rope + indexer_k = <strong>3 tensors</strong><br>C8 A3: + indexer_scale = <strong>4 tensors</strong><br>C8 A5: CKV + indexer_k + scale = <strong>3 tensors</strong><br>⚠ 数量<strong>非单调</strong> 3→4→3</td>
+        <td style="text-align:center">1 → <strong style="color:#C60054">3~4</strong></td>
+        <td class="gap-cell">★★★</td>
+      </tr>
+      <tr>
+        <td style="font-weight:700">Compress MLA<br><span style="font-size:0.8em;color:#64748B">DS V4</span></td>
+        <td class="up-cell"><code>(N,B,584)</code> fp8 · 1 tensor · opaque blob<br>= NoPE(448B) + RoPE(128B) + Scale(8B)<br>V3.2=656 vs V4=584 — 不同 Backend 子类</td>
+        <td class="ac-cell">1 int8 buffer → as_strided 2~3 views<br>view[0]: indexer_k · view[1]: indexer_scale<br>view[2] (A5 only): full overlay<br>⚠ "复杂度倒挂" — allocate 最简, reshape 最繁</td>
+        <td style="text-align:center">1 → <strong style="color:#C60054">1 buf + 2~3 views</strong></td>
+        <td class="gap-cell">★★★★</td>
+      </tr>
+      <tr>
+        <td style="font-weight:700">Hybrid<br><span style="font-size:0.8em;color:#64748B">Qwen3.5</span></td>
+        <td class="up-cell">FullAttentionSpec + MambaSpec<br>shared_by 多层共享 · as_strided_ 零拷贝<br>自然共存，无 padding</td>
+        <td class="ac-cell">复用上游 Spec · 但 page_size_padded<br>+ conv_padding strip + 手动 K/V offset<br>+ split + 组装 tuple · ~100 行<br>⚠ 唯一不用万能类却差距最大的模型</td>
+        <td style="text-align:center">shared → <strong style="color:#C60054">multi-region manual</strong></td>
+        <td class="gap-cell">★★★★★</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ═══════════════════ ROOT CAUSE ═══════════════════ -->
+<div class="section">
+  <h2>🔍 三个根本源头</h2>
+  <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:20px; margin-top:20px;">
+    <div style="background:var(--card); border:2px solid #DC2626; border-radius:12px; padding:20px;">
+      <div style="font-size:1.1em; font-weight:800; color:#DC2626; margin-bottom:8px;">🔴 硬件约束</div>
+      <div style="font-size:0.88em; color:#64748B; line-height:1.7;">
+        NPU 算子不支持 stride 访问<br>→ DMA Engine 只接受 {base_addr, length}<br>→ Host 侧必须预拆分为连续 tensor<br>→ 涵盖 K/V 分离、Sparse 多 tensor<br>Compress 交织、A3/A5 差异
+      </div>
+    </div>
+    <div style="background:var(--card); border:2px solid #C60054; border-radius:12px; padding:20px;">
+      <div style="font-size:1.1em; font-weight:800; color:#C60054; margin-bottom:8px;">🟣 Spec 设计</div>
+      <div style="font-size:0.88em; color:#64748B; line-height:1.7;">
+        类型不编码语义<br>→ 5 种 MLA 变体 → 1 个 AscendMLAAttentionSpec<br>→ isinstance() 无区分力<br>→ 下游用 if-else 恢复丢失的类型信息<br>→ 精度 × 硬件 × 模型 组合爆炸
+      </div>
+    </div>
+    <div style="background:var(--card); border:2px solid #D97706; border-radius:12px; padding:20px;">
+      <div style="font-size:1.1em; font-weight:800; color:#D97706; margin-bottom:8px;">🟠 接口缺陷</div>
+      <div style="font-size:0.88em; color:#64748B; line-height:1.7;">
+        get_kv_cache_shape() 单返回值<br>→ tuple[int,...] 无法表达多 tensor 布局<br>→ 只能返回 1/N 参考 shape<br>→ 剩余 N-1/N 泄漏到 model_runner<br>→ 接口假设 "1 attention = 1 tensor"
+      </div>
+    </div>
+  </div>
+  <div style="margin-top:20px; padding:20px; background:#FEFCE8; border:1px solid #FDE68A; border-radius:12px; font-size:0.92em; line-height:1.8;">
+    <strong style="color:#B45309;">💡 三者互相放大：</strong><br>
+    如果 NPU 支持 stride → Spec 设计缺陷影响小得多（不需要多 tensor 拆分）<br>
+    如果 Spec 用了正确的子类 → 硬件约束的后果更可控（split 逻辑封装在子类里）<br>
+    如果接口返回完整 Layout → 硬件约束的细节不会泄漏到 model_runner<br>
+    <strong>三者叠加 → model_runner ~600 行、15+ if-else 分支。</strong>
+  </div>
+</div>
+
+<!-- ═══════════════════ PRINCIPLES ═══════════════════ -->
+<div class="section">
+  <h2>📐 上游核心原则 vs Ascend 现状</h2>
+  <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px;">
+    <div style="background:var(--upstream-bg); border:2px solid var(--upstream); border-radius:12px; padding:24px;">
+      <div style="font-size:1.2em; font-weight:800; color:var(--upstream); margin-bottom:12px;">🔵 上游 vLLM — 三条原则</div>
+      <div style="font-size:0.9em; line-height:1.8; color:#1E293B;">
+        <strong>1. Backend 说了算</strong> — KV Cache shape 的唯一决定者。get_kv_cache_shape() 返回完整可用 shape。tensor 数量、K/V 存储方式——全部由 Backend 封装。<br><br>
+        <strong>2. 单 Tensor 原则</strong> — 所有模型类型都产生 1 个 tensor/层。MLA 的 kv_lora+k_rope 在同一 tensor 内，kernel 自己 offset。Mamba 的 1 buffer → N 个 as_strided 零拷贝视图。<br><br>
+        <strong>3. model_runner 零感知</strong> — 不检查 layer_type。不判断 use_sparse/C8/A5/A3。拿到 Spec→shape→分配→reshape→结束。~60 行，0 分支。
+      </div>
+    </div>
+    <div style="background:var(--ascend-bg); border:2px solid var(--ascend); border-radius:12px; padding:24px;">
+      <div style="font-size:1.2em; font-weight:800; color:var(--ascend); margin-bottom:12px;">🔴 vLLM-Ascend — 三条偏离</div>
+      <div style="font-size:0.9em; line-height:1.8; color:#1E293B;">
+        <strong>1. Backend 只答 1/N</strong> — Backend 返回 (N,B,1,576) 作为"参考 shape"。Sparse MLA 需要 3~4 个独立 tensor，但接口只返回 1 个等价 shape。剩余泄漏到 model_runner。<br><br>
+        <strong>2. 多 Tensor 原则（被迫）</strong> — NPU 不支持 stride → K/V 必须物理分离 → Sparse MLA 必须 host 预拆分 → Compress 需要 as_strided 承载模型语义。<br><br>
+        <strong>3. model_runner 被迫感知一切</strong> — 检查 use_sparse / compress / hybrid / C8 / A5 / A3 / cache_only → ~600 行，15+ if-else。每新模型改 3~5 处。
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="text-align:center; padding:40px 20px; color:#94A3B8; font-size:0.85em; border-top:1px solid var(--border); margin-top:40px;">
+  vLLM vs vLLM-Ascend KV Cache Token 级存储对比 · 2026-07 · 基于 vllm / vllm-ascend 源码分析
+</div>
+
+</body>
+</html>
