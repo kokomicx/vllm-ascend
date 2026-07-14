@@ -6,16 +6,21 @@ End-to-end correctness test for Layout-driven KV cache refactoring.
 Compares KV cache tensor shapes and generation outputs between the old
 code path (gate=0) and the new Layout-driven code path (gate=1).
 
+Uses the ``VLLM_ASCEND_DUMP_KV_CACHE`` env var to trigger a KV cache
+metadata dump from *inside* the engine-core process.  This works
+regardless of multiprocess architecture and does not require accessing
+internal engine objects from the main process.
+
 Usage (run twice — once per gate value, then compare the JSON outputs):
 
     # Old path
     VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH=0 ASCEND_RT_VISIBLE_DEVICES=0 \\
-    pytest -sv tests/e2e/test_layout_correctness.py \\
+    python tests/e2e/test_layout_correctness.py \\
         --model /path/to/model --output /tmp/kv_old.json
 
     # New path
     VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH=1 ASCEND_RT_VISIBLE_DEVICES=0 \\
-    pytest -sv tests/e2e/test_layout_correctness.py \\
+    python tests/e2e/test_layout_correctness.py \\
         --model /path/to/model --output /tmp/kv_new.json
 
     # Compare
@@ -29,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 from typing import Any
 
 import pytest
@@ -37,93 +43,8 @@ from vllm import LLM, SamplingParams
 
 
 # ---------------------------------------------------------------------------
-# Helpers: extract KV cache metadata from a running LLM instance
+# generate + capture (env-var-driven dump)
 # ---------------------------------------------------------------------------
-
-def _get_model_runner(llm: LLM):
-    """Traverse engine internals to reach NPUModelRunner.
-
-    Works with vLLM v1 engine architecture.  May need adjustment if the
-    internal engine structure changes across vLLM versions.
-    """
-    engine_core = llm.llm_engine.engine_core
-    # Try the primary worker path (single-node, non-PD)
-    for attr in ("engine_core_workers", "workers"):
-        workers = getattr(engine_core, attr, None)
-        if workers and len(workers) > 0:
-            return workers[0].worker.model_runner
-    raise RuntimeError("Cannot locate NPUModelRunner in engine internals")
-
-
-def _describe_kv_cache(tensor: object) -> dict[str, Any]:
-    """Produce a JSON-serialisable description of one layer's KV cache."""
-    if isinstance(tensor, torch.Tensor):
-        return {
-            "container": "tensor",
-            "shape": list(tensor.shape),
-            "dtype": str(tensor.dtype),
-            "is_contiguous": tensor.is_contiguous(),
-        }
-    if isinstance(tensor, tuple):
-        return {
-            "container": "tuple",
-            "num_tensors": len(tensor),
-            "entries": [_describe_kv_cache(t) for t in tensor],
-        }
-    if isinstance(tensor, list):
-        return {
-            "container": "list",
-            "num_tensors": len(tensor),
-            "entries": [_describe_kv_cache(t) for t in tensor],
-        }
-    return {"container": "unknown", "type": str(type(tensor))}
-
-
-def dump_kv_cache_snapshot(llm: LLM) -> dict[str, Any]:
-    """Capture KV cache shapes, dtypes and contiguity from a live engine."""
-    runner = _get_model_runner(llm)
-    kv_caches = getattr(runner, "kv_caches", [])
-    if not kv_caches:
-        raise RuntimeError("kv_caches is empty — did the model run a forward pass?")
-
-    layers: dict[str, dict] = {}
-    for idx, cache in enumerate(kv_caches):
-        layers[f"kv_cache_{idx}"] = _describe_kv_cache(cache)
-
-    return {
-        "gate_enabled": os.environ.get("VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH", "0"),
-        "num_layers": len(kv_caches),
-        "layers": layers,
-    }
-
-
-def _patch_reshape_and_cache_noop():
-    """Monkey-patch reshape_and_cache to a no-op.
-
-    On some NPU servers the ``_C_ascend.npu_scatter_pa_kv_cache_vllm`` op is
-    not installed.  Since we only need to compare KV cache *shapes* (which are
-    determined at allocation time, before any forward pass), we can safely
-    skip the scatter without affecting the snapshot.
-    """
-    from vllm_ascend.device.device_op import BaseDeviceAdaptor
-
-    # Save original
-    _original = BaseDeviceAdaptor.reshape_and_cache
-
-    @classmethod
-    def _noop(cls, key, value, key_cache, value_cache, slot_mapping):
-        pass
-
-    BaseDeviceAdaptor.reshape_and_cache = _noop
-    return _original
-
-
-def _restore_reshape_and_cache(original):
-    """Restore the original reshape_and_cache method."""
-    from vllm_ascend.device.device_op import BaseDeviceAdaptor
-
-    BaseDeviceAdaptor.reshape_and_cache = original
-
 
 def generate_and_capture(
     model: str,
@@ -132,12 +53,19 @@ def generate_and_capture(
 ) -> dict[str, Any]:
     """Load a model, optionally run one short generation, capture KV cache metadata.
 
-    When ``no_generate=True``, skips the forward pass entirely and captures
-    KV cache shapes right after model initialisation.  This works around the
-    missing ``_C_ascend.npu_scatter_pa_kv_cache_vllm`` op.
+    The KV cache metadata is captured via ``VLLM_ASCEND_DUMP_KV_CACHE``,
+    which causes ``NPUModelRunner.initialize_kv_cache_tensors`` to write a
+    JSON snapshot from inside the engine-core process.  This avoids the need
+    to traverse engine internals from the main process.
+
+    When ``no_generate=True``, skips the forward pass and captures KV cache
+    shapes right after model initialisation.
     """
-    # Patch before LLM() in case the profile run triggers scatter
-    _orig_reshape_and_cache = _patch_reshape_and_cache_noop()
+    # Use a temp file for the engine-core dump — the engine-core process
+    # writes JSON to this path, then we read it back in the main process.
+    dump_fd, dump_path = tempfile.mkstemp(suffix=".json", prefix="kv_dump_")
+    os.close(dump_fd)
+    os.environ["VLLM_ASCEND_DUMP_KV_CACHE"] = dump_path
 
     try:
         llm = LLM(
@@ -157,7 +85,10 @@ def generate_and_capture(
             outputs = llm.generate(prompts, sampling_params)
             generated_text = outputs[0].outputs[0].text
 
-        snapshot = dump_kv_cache_snapshot(llm)
+        # Read the snapshot dumped by the engine-core process
+        with open(dump_path) as f:
+            snapshot = json.load(f)
+
         snapshot["generated_text"] = generated_text
         snapshot["model"] = model
         snapshot["max_model_len"] = max_model_len
@@ -168,7 +99,12 @@ def generate_and_capture(
 
         return snapshot
     finally:
-        _restore_reshape_and_cache(_orig_reshape_and_cache)
+        # Clean up env var and temp file
+        os.environ.pop("VLLM_ASCEND_DUMP_KV_CACHE", None)
+        try:
+            os.unlink(dump_path)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +198,7 @@ if __name__ == "__main__":
         "--no-generate",
         action="store_true",
         help="Skip generation (forward pass) — only capture KV cache shapes "
-        "after model init.  Works around missing _C_ascend ops.",
+        "after model init.",
     )
     args = parser.parse_args()
 

@@ -667,36 +667,13 @@ class SingleTensorLayout(KVCacheLayout):  # cache_only / draft
 
 ### 12.2 对齐步骤
 
-**Phase 1（Q3，进行中）**：内部重构 — Spec 子类拆分 + Layout 多态 → model_runner ~135 行
+**Phase 1（进行中）**：内部重构 — Spec 子类拆分 + Layout 多态 → model_runner ~135 行
 
-**Phase 2（Q4）**：向上游提 RFC — 提议 KVCacheLayout 作为硬件无关抽象 → Spec 字段通用化
+**Phase 2**：向上游提 RFC — 提议 KVCacheLayout 作为硬件无关抽象 → Spec 字段通用化
 
-**Phase 3（Q1+）**：社区合入 → 删除 patch → 回归上游模式
+**Phase 3**：社区合入 → 删除 patch → 回归上游模式
 
 ### 12.3 已对齐无需处理
 
 以下机制 Ascend 已与上游对齐：`KVCacheSpec` 基类、`KVCacheConfig`/`KVCacheTensor` 数据结构、`get_kv_cache_groups()` 决策级联（仅 DS V4 有 patch）、`BlockPool`/`SingleTypeKVCacheManager`/`KVCacheCoordinator` 体系、Prefix caching、`shared_by` 多层共享机制。
 
----
-
-## 附录：相关文件索引
-
-| 文件 | 说明 |
-|------|------|
-| `vllm_ascend/core/kv_cache_layout.py` | Layout 抽象基类 + 6 个子类（624 行，新增） |
-| `vllm_ascend/patch/platform/patch_kv_cache_interface.py` | Monkey-patch Spec → Layout 分发 |
-| `vllm_ascend/worker/model_runner_v1.py` | model_runner（含 V2 allocate/reshape，feature gate 保护） |
-| `vllm_ascend/attention/attention_v1.py` | GQA Backend |
-| `vllm_ascend/attention/mla_v1.py` | MLA Backend |
-| `vllm_ascend/attention/sfa_v1.py` | SFA Backend |
-| `vllm_ascend/attention/dsa_v1.py` | DSA Backend |
-| `vllm_ascend/device/device_op.py` | 算子入口（40+ 方法） |
-| `vllm_ascend/patch/platform/patch_kv_cache_utils.py` | DS V4 分组 patch |
-| `docs/operator_dependency_inventory.md` | 算子依赖清单 |
-| `docs/task.md` | 任务看板 |
-| `tests/test_phase2_spec_dispatch.py` | Phase 2 测试（11 个） |
-| `tests/test_phase3_layout_dispatch.py` | Phase 3 测试（18 个） |
-
----
-
-> 最后更新：2026-07-13

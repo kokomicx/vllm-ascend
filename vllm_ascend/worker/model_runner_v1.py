@@ -3838,6 +3838,56 @@ class NPUModelRunner(GPUModelRunner):
 
         return kv_caches
 
+    # --- KV cache snapshot dump (env-var gated, used by E2E tests) ---
+
+    def _describe_kv_cache_tensor(self, tensor: object) -> dict[str, Any]:
+        """Produce a JSON-serialisable description of one layer's KV cache."""
+        if isinstance(tensor, torch.Tensor):
+            return {
+                "container": "tensor",
+                "shape": list(tensor.shape),
+                "dtype": str(tensor.dtype),
+                "is_contiguous": tensor.is_contiguous(),
+            }
+        if isinstance(tensor, tuple):
+            return {
+                "container": "tuple",
+                "num_tensors": len(tensor),
+                "entries": [self._describe_kv_cache_tensor(t) for t in tensor],
+            }
+        if isinstance(tensor, list):
+            return {
+                "container": "list",
+                "num_tensors": len(tensor),
+                "entries": [self._describe_kv_cache_tensor(t) for t in tensor],
+            }
+        return {"container": "unknown", "type": str(type(tensor))}
+
+    def _maybe_dump_kv_cache_snapshot(self):
+        """If VLLM_ASCEND_DUMP_KV_CACHE is set, write KV cache metadata JSON to that path.
+
+        This runs inside the engine-core process so it has direct access to
+        ``self.kv_caches`` regardless of multiprocess architecture.
+        """
+        import json
+
+        dump_path = os.environ.get("VLLM_ASCEND_DUMP_KV_CACHE")
+        if not dump_path:
+            return
+
+        layers: dict[str, dict] = {}
+        for idx, cache in enumerate(self.kv_caches):
+            layers[f"kv_cache_{idx}"] = self._describe_kv_cache_tensor(cache)
+
+        snapshot = {
+            "gate_enabled": os.environ.get("VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH", "0"),
+            "num_layers": len(self.kv_caches),
+            "layers": layers,
+        }
+        with open(dump_path, "w") as f:
+            json.dump(snapshot, f, indent=2)
+        logger.info("KV cache snapshot dumped to %s (%d layers)", dump_path, len(self.kv_caches))
+
     # --- Original initialize_kv_cache_tensors (gated) ---
 
     def initialize_kv_cache_tensors(
@@ -3854,9 +3904,11 @@ class NPUModelRunner(GPUModelRunner):
             corresponding memory buffer for KV cache.
         """
         if VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH:
-            return self._initialize_kv_cache_tensors_v2(
+            result = self._initialize_kv_cache_tensors_v2(
                 kv_cache_config, kernel_block_sizes,
             )
+            self._maybe_dump_kv_cache_snapshot()
+            return result
 
         # Initialize the memory buffer for KV cache
         kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
@@ -3904,6 +3956,7 @@ class NPUModelRunner(GPUModelRunner):
                 kvcomp_meta_data=self.kvcomp_meta_data
             )
 
+        self._maybe_dump_kv_cache_snapshot()
         return kv_caches
 
     def _get_layer_kv_cache_specs(self, kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
