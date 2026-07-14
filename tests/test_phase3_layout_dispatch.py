@@ -259,8 +259,8 @@ def test_reshape_single_tensor():
     spec = FullAttentionSpec(
         block_size=128, num_kv_heads=4, head_size=128,
         dtype=torch.bfloat16, head_size_v=128,
+        page_size_bytes=128 * 4 * 128 * 2,
     )
-    spec.page_size_bytes = 128 * 4 * 128 * 2
     total = spec.page_size_bytes * 4
     raw = torch.zeros(total, dtype=torch.int8)
 
@@ -281,8 +281,8 @@ def test_reshape_split_kv():
     spec = FullAttentionSpec(
         block_size=128, num_kv_heads=4, head_size=128,
         dtype=torch.bfloat16, head_size_v=128,
+        page_size_bytes=128 * 4 * 256 * 2,  # K+V combined
     )
-    spec.page_size_bytes = 128 * 4 * 256 * 2  # K+V combined
     total = spec.page_size_bytes * 4
     sizes = SplitKVLayout().split_sizes(total, spec, head_dims=(128, 128))
     raw_k = torch.zeros(sizes[0], dtype=torch.int8)
