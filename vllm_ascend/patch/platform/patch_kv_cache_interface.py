@@ -12,6 +12,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    HiddenStateCacheSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -296,7 +297,18 @@ def _full_attention_get_kv_cache_layout(self):
 
 
 def _kvcachespec_get_kv_cache_layout(self):
-    """Default fallback — works for HiddenStateCacheSpec and unpatched specs."""
+    """Default fallback for unpatched / unknown KVCacheSpec subclasses.
+
+    Examples: ChunkedLocalAttentionSpec, EncoderOnlyAttentionSpec,
+    CrossAttentionSpec. All return a single contiguous tensor.
+    """
+    from vllm_ascend.core.kv_cache_layout import SingleTensorLayout
+
+    return SingleTensorLayout()
+
+
+def _hidden_state_get_kv_cache_layout(self):
+    """Hidden state cache: single tensor layout (not a real attention layer)."""
     from vllm_ascend.core.kv_cache_layout import SingleTensorLayout
 
     return SingleTensorLayout()
@@ -306,3 +318,4 @@ def _kvcachespec_get_kv_cache_layout(self):
 MambaSpec.get_kv_cache_layout = _mamba_get_kv_cache_layout
 FullAttentionSpec.get_kv_cache_layout = _full_attention_get_kv_cache_layout
 KVCacheSpec.get_kv_cache_layout = _kvcachespec_get_kv_cache_layout
+HiddenStateCacheSpec.get_kv_cache_layout = _hidden_state_get_kv_cache_layout
