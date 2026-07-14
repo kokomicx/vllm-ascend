@@ -3620,7 +3620,6 @@ class NPUModelRunner(GPUModelRunner):
         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, spec)
         kwargs: dict[str, Any] = {
             "head_dims": (k_dim, v_dim),
-            "vllm_config": self.vllm_config,
             "layer_name": layer_name,
         }
         if enable_fa_quant(self.vllm_config):
