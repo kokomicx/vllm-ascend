@@ -268,32 +268,12 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
 
 
 # ---------------------------------------------------------------------------
-# AscendFullAttentionSpec — GQA/SWA models always use SplitKVLayout on Ascend
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, kw_only=True)
-class AscendFullAttentionSpec(FullAttentionSpec):
-    """FullAttentionSpec with Ascend physical layout dispatch.
-
-    On Ascend, all GQA / sliding window attention models require physically
-    separated K and V tensors for PD RDMA alignment.
-    """
-
-    def get_kv_cache_layout(self):
-        from vllm_ascend.core.kv_cache_layout import SplitKVLayout
-
-        return SplitKVLayout()
-
-
-# ---------------------------------------------------------------------------
 # Monkey-patch upstream classes
 # ---------------------------------------------------------------------------
 
 # Replace upstream Spec classes with Ascend-aware versions
 vllm.v1.kv_cache_interface.MLAAttentionSpec = AscendMLAAttentionSpec
 vllm.v1.kv_cache_interface.SlidingWindowMLASpec = AscendSlidingWindowMLASpec
-vllm.v1.kv_cache_interface.FullAttentionSpec = AscendFullAttentionSpec
 vllm.model_executor.layers.attention.mla_attention.MLAAttentionSpec = AscendMLAAttentionSpec
 
 
@@ -308,6 +288,13 @@ def _mamba_get_kv_cache_layout(self):
     return MambaLayout()
 
 
+def _full_attention_get_kv_cache_layout(self):
+    """GQA / sliding window attention: physically separated K and V tensors."""
+    from vllm_ascend.core.kv_cache_layout import SplitKVLayout
+
+    return SplitKVLayout()
+
+
 def _kvcachespec_get_kv_cache_layout(self):
     """Default fallback — works for HiddenStateCacheSpec and unpatched specs."""
     from vllm_ascend.core.kv_cache_layout import SingleTensorLayout
@@ -317,4 +304,5 @@ def _kvcachespec_get_kv_cache_layout(self):
 
 # Attach to upstream classes that don't have Ascend subclasses
 MambaSpec.get_kv_cache_layout = _mamba_get_kv_cache_layout
+FullAttentionSpec.get_kv_cache_layout = _full_attention_get_kv_cache_layout
 KVCacheSpec.get_kv_cache_layout = _kvcachespec_get_kv_cache_layout
