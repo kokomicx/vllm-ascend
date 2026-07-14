@@ -113,6 +113,7 @@ python "$SCRIPT_DIR/test_layout_correctness.py" \
     --model "$MODEL" \
     --max-model-len "$MAX_MODEL_LEN" \
     --output "$OLD_JSON" \
+    --no-generate \
     || _err "Old-path snapshot failed"
 
 _info "   Old-path snapshot saved to $OLD_JSON"
@@ -127,6 +128,7 @@ python "$SCRIPT_DIR/test_layout_correctness.py" \
     --model "$MODEL" \
     --max-model-len "$MAX_MODEL_LEN" \
     --output "$NEW_JSON" \
+    --no-generate \
     || _err "New-path snapshot failed"
 
 _info "   New-path snapshot saved to $NEW_JSON"

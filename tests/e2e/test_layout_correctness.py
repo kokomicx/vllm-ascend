@@ -97,35 +97,78 @@ def dump_kv_cache_snapshot(llm: LLM) -> dict[str, Any]:
     }
 
 
+def _patch_reshape_and_cache_noop():
+    """Monkey-patch reshape_and_cache to a no-op.
+
+    On some NPU servers the ``_C_ascend.npu_scatter_pa_kv_cache_vllm`` op is
+    not installed.  Since we only need to compare KV cache *shapes* (which are
+    determined at allocation time, before any forward pass), we can safely
+    skip the scatter without affecting the snapshot.
+    """
+    from vllm_ascend.device.device_op import BaseDeviceAdaptor
+
+    # Save original
+    _original = BaseDeviceAdaptor.reshape_and_cache
+
+    @classmethod
+    def _noop(cls, key, value, key_cache, value_cache, slot_mapping):
+        pass
+
+    BaseDeviceAdaptor.reshape_and_cache = _noop
+    return _original
+
+
+def _restore_reshape_and_cache(original):
+    """Restore the original reshape_and_cache method."""
+    from vllm_ascend.device.device_op import BaseDeviceAdaptor
+
+    BaseDeviceAdaptor.reshape_and_cache = original
+
+
 def generate_and_capture(
     model: str,
     max_model_len: int,
+    no_generate: bool = False,
 ) -> dict[str, Any]:
-    """Load a model, run one short generation, capture KV cache metadata."""
-    llm = LLM(
-        model=model,
-        max_model_len=max_model_len,
-        max_num_seqs=4,
-        enforce_eager=True,
-        gpu_memory_utilization=0.30,
-        trust_remote_code=True,
-    )
+    """Load a model, optionally run one short generation, capture KV cache metadata.
 
-    prompts = ["Hello, how are you?"]
-    sampling_params = SamplingParams(max_tokens=8, temperature=0.0, seed=42)
-    outputs = llm.generate(prompts, sampling_params)
-    generated_text = outputs[0].outputs[0].text
+    When ``no_generate=True``, skips the forward pass entirely and captures
+    KV cache shapes right after model initialisation.  This works around the
+    missing ``_C_ascend.npu_scatter_pa_kv_cache_vllm`` op.
+    """
+    # Patch before LLM() in case the profile run triggers scatter
+    _orig_reshape_and_cache = _patch_reshape_and_cache_noop()
 
-    snapshot = dump_kv_cache_snapshot(llm)
-    snapshot["generated_text"] = generated_text
-    snapshot["model"] = model
-    snapshot["max_model_len"] = max_model_len
+    try:
+        llm = LLM(
+            model=model,
+            max_model_len=max_model_len,
+            max_num_seqs=4,
+            enforce_eager=True,
+            gpu_memory_utilization=0.30,
+            trust_remote_code=True,
+        )
 
-    # Clean up
-    del llm
-    torch.cuda.empty_cache()
+        if no_generate:
+            generated_text = "(skipped — --no-generate)"
+        else:
+            prompts = ["Hello, how are you?"]
+            sampling_params = SamplingParams(max_tokens=8, temperature=0.0, seed=42)
+            outputs = llm.generate(prompts, sampling_params)
+            generated_text = outputs[0].outputs[0].text
 
-    return snapshot
+        snapshot = dump_kv_cache_snapshot(llm)
+        snapshot["generated_text"] = generated_text
+        snapshot["model"] = model
+        snapshot["max_model_len"] = max_model_len
+
+        # Clean up
+        del llm
+        torch.cuda.empty_cache()
+
+        return snapshot
+    finally:
+        _restore_reshape_and_cache(_orig_reshape_and_cache)
 
 
 # ---------------------------------------------------------------------------
@@ -215,9 +258,15 @@ if __name__ == "__main__":
     parser.add_argument("--model", required=True)
     parser.add_argument("--output", default=None)
     parser.add_argument("--max-model-len", type=int, default=2048)
+    parser.add_argument(
+        "--no-generate",
+        action="store_true",
+        help="Skip generation (forward pass) — only capture KV cache shapes "
+        "after model init.  Works around missing _C_ascend ops.",
+    )
     args = parser.parse_args()
 
-    snapshot = generate_and_capture(args.model, args.max_model_len)
+    snapshot = generate_and_capture(args.model, args.max_model_len, no_generate=args.no_generate)
 
     output_path = args.output
     if output_path is None:
