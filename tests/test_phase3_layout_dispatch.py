@@ -260,8 +260,10 @@ def test_reshape_single_tensor():
         block_size=128, num_kv_heads=4, head_size=128,
         dtype=torch.bfloat16, head_size_v=128,
     )
-    total = spec.page_size_bytes * 4
-    raw = torch.zeros(total, dtype=torch.int8)
+    # spec.dtype is the physical storage dtype (int8), so compute raw size directly:
+    # (num_blocks, block_size, num_kv_heads, head_size) in int8
+    raw_bytes = 4 * 128 * 4 * 128  # = 262144 int8 bytes
+    raw = torch.zeros(raw_bytes, dtype=torch.int8)
 
     layout = SingleTensorLayout()
     result = layout.reshape(
@@ -270,7 +272,7 @@ def test_reshape_single_tensor():
         vllm_config=MagicMock(),
     )
     assert result.shape == (4, 128, 4, 128), f"Unexpected shape: {result.shape}"
-    assert result.dtype == torch.bfloat16
+    assert result.dtype == spec.dtype
     print(f"  ✓ SingleTensor: shape={result.shape}")
 
 
@@ -281,7 +283,9 @@ def test_reshape_split_kv():
         block_size=128, num_kv_heads=4, head_size=128,
         dtype=torch.bfloat16, head_size_v=128,
     )
-    total = spec.page_size_bytes * 4
+    # Each cache tensor: (num_blocks, block_size, num_kv_heads, head_size)
+    per_cache_bytes = 4 * 128 * 4 * 128  # = 262144 int8 bytes
+    total = per_cache_bytes * 2  # K + V
     sizes = SplitKVLayout().split_sizes(total, spec, head_dims=(128, 128))
     raw_k = torch.zeros(sizes[0], dtype=torch.int8)
     raw_v = torch.zeros(sizes[1], dtype=torch.int8)
@@ -304,9 +308,8 @@ def test_reshape_mamba():
         shapes=((4, 256), (16, 16)),
         dtypes=(torch.float32, torch.float32),
     )
-    spec.page_size_bytes = (4 * 256 * 4) + (16 * 16 * 4)
-    total = spec.page_size_bytes * 4
-    raw = torch.zeros(total, dtype=torch.int8)
+    raw_bytes = (4 * 256 * 4 + 16 * 16 * 4) * 4  # 2 states × 4 blocks
+    raw = torch.zeros(raw_bytes, dtype=torch.int8)
 
     layout = MambaLayout()
     result = layout.reshape(
@@ -328,7 +331,7 @@ def test_reshape_sparse_mla():
         block_size=128, num_kv_heads=1, head_size=704,
         dtype=torch.bfloat16, sparse_head_dim=(512, 64, 128),
     )
-    total = spec.page_size_bytes * 4
+    total = (512 + 64 + 128) * 128 * 1 * 4  # int8 bytes for 4 blocks
     layout = spec.get_kv_cache_layout()
     sizes = layout.split_sizes(total, spec)
     raw = [torch.zeros(s, dtype=torch.int8) for s in sizes]
