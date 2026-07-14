@@ -4342,9 +4342,20 @@ class NPUModelRunner(GPUModelRunner):
                 if layer_name in self.runner_only_attn_layers:
                     continue
 
-                raw_tensor = kv_cache_raw_tensors[layer_name]
-                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-                num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+                raw_val = kv_cache_raw_tensors[layer_name]
+                split_kv = isinstance(raw_val, tuple)
+                if split_kv:
+                    # _allocate_kv_cache_tensors returns (k, v) for GQA attn
+                    # layers. page_size_bytes includes 2× K/V factor.
+                    raw_k_tensor, raw_v_tensor = raw_val
+                    sum_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
+                    assert sum_bytes % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = sum_bytes // kv_cache_spec.page_size_bytes
+                else:
+                    raw_tensor = raw_val
+                    assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
                     num_blocks_per_kv_block = (
@@ -4361,20 +4372,52 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     dtype = kv_cache_spec.dtype
 
-                    kv_cache = kv_cache_raw_tensors[layer_name].view(dtype).view(kv_cache_shape)
-                    # [DEBUG HMA] Log KV cache reshape to verify shape correctness
-                    logger.warning(
-                        "KV_RESHAPE_ATTN layer=%s spec_block_size=%d kernel_block_size=%d "
-                        "num_blocks_per_kv=%d num_phys_blocks=%d kernel_num_blocks=%d "
-                        "shape=%s dtype=%s page_size_bytes=%d raw_bytes=%d",
-                        layer_name, kv_cache_spec.block_size, kernel_block_size,
-                        num_blocks_per_kv_block, num_blocks, kernel_num_blocks,
-                        tuple(kv_cache_shape), dtype,
-                        kv_cache_spec.page_size_bytes, raw_tensor.numel(),
-                    )
-                    kv_caches[layer_name] = kv_cache
+                    if split_kv:
+                        head_size_v = (
+                            kv_cache_spec.head_size_v
+                            if hasattr(kv_cache_spec, "head_size_v")
+                            else kv_cache_spec.head_size
+                        )
+                        # FA3/Attention backends return (2, N, BS, H, D) with
+                        # a leading 2× K/V factor.  Drop it for separate K/V.
+                        if kv_cache_shape[0] == 2:
+                            base_shape = kv_cache_shape[1:]
+                        else:
+                            base_shape = kv_cache_shape
+                        k_shape = base_shape[:-1] + (kv_cache_spec.head_size,)
+                        v_shape = base_shape[:-1] + (head_size_v,)
+                        k_cache = raw_k_tensor.view(dtype).view(k_shape)
+                        v_cache = raw_v_tensor.view(dtype).view(v_shape)
+                        logger.warning(
+                            "KV_RESHAPE_ATTN layer=%s spec_block_size=%d kernel_block_size=%d "
+                            "num_blocks_per_kv=%d num_phys_blocks=%d kernel_num_blocks=%d "
+                            "k_shape=%s v_shape=%s dtype=%s page_size_bytes=%d "
+                            "k_bytes=%d v_bytes=%d",
+                            layer_name, kv_cache_spec.block_size, kernel_block_size,
+                            num_blocks_per_kv_block, num_blocks, kernel_num_blocks,
+                            tuple(k_shape), tuple(v_shape), dtype,
+                            kv_cache_spec.page_size_bytes,
+                            raw_k_tensor.numel(), raw_v_tensor.numel(),
+                        )
+                        kv_caches[layer_name] = (k_cache, v_cache)
+                    else:
+                        kv_cache = raw_tensor.view(dtype).view(kv_cache_shape)
+                        # [DEBUG HMA] Log KV cache reshape to verify shape correctness
+                        logger.warning(
+                            "KV_RESHAPE_ATTN layer=%s spec_block_size=%d kernel_block_size=%d "
+                            "num_blocks_per_kv=%d num_phys_blocks=%d kernel_num_blocks=%d "
+                            "shape=%s dtype=%s page_size_bytes=%d raw_bytes=%d",
+                            layer_name, kv_cache_spec.block_size, kernel_block_size,
+                            num_blocks_per_kv_block, num_blocks, kernel_num_blocks,
+                            tuple(kv_cache_shape), dtype,
+                            kv_cache_spec.page_size_bytes, raw_tensor.numel(),
+                        )
+                        kv_caches[layer_name] = kv_cache
 
                 elif isinstance(kv_cache_spec, MambaSpec):
+                    assert not split_kv, (
+                        f"Mamba layer {layer_name}: unexpected split K/V tuple"
+                    )
                     has_mamba = True
                     shapes_with_blocks = tuple((num_blocks, *shape) for shape in kv_cache_spec.shapes)
                     state_tensors = self._adjust_kv_layout(
