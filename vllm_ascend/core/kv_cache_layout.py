@@ -281,8 +281,15 @@ class SplitKVLayout(KVCacheLayout):
             spec.num_kv_heads,
             spec.head_size,
         )
-        k_shape = kv_cache_shape[:-1] + (k_dim,)
-        v_shape = kv_cache_shape[:-1] + (v_dim,)
+        # FA3/Attention backends return (2, N, BS, H, D) with a leading 2×
+        # K/V factor.  SplitKVLayout handles separate K/V tensors, so drop
+        # the leading dimension (same logic as old V1 reshape).
+        if kv_cache_shape[0] == 2:
+            base_shape = kv_cache_shape[1:]
+        else:
+            base_shape = kv_cache_shape
+        k_shape = base_shape[:-1] + (k_dim,)
+        v_shape = base_shape[:-1] + (v_dim,)
 
         # Determine per-tensor dtype (FA-quant may override)
         k_dtype = v_dtype = spec.dtype
@@ -356,8 +363,13 @@ class SparseMLALayout(KVCacheLayout):
             spec.num_kv_heads,
             spec.head_size,
         )
-        k_shape = kv_cache_shape[:-1] + (k_dim,)
-        v_shape = kv_cache_shape[:-1] + (v_dim,)
+        # Drop leading 2× K/V factor (same as SplitKVLayout)
+        if kv_cache_shape[0] == 2:
+            base_shape = kv_cache_shape[1:]
+        else:
+            base_shape = kv_cache_shape
+        k_shape = base_shape[:-1] + (k_dim,)
+        v_shape = base_shape[:-1] + (v_dim,)
         dsa_k_shape = (
             kernel_num_blocks,
             kernel_block_size,
@@ -433,8 +445,13 @@ class SparseMLAC8Layout(KVCacheLayout):
             spec.num_kv_heads,
             spec.head_size,
         )
-        k_shape = kv_cache_shape[:-1] + (k_dim,)
-        v_shape = kv_cache_shape[:-1] + (v_dim,)
+        # Drop leading 2× K/V factor (same as SplitKVLayout)
+        if kv_cache_shape[0] == 2:
+            base_shape = kv_cache_shape[1:]
+        else:
+            base_shape = kv_cache_shape
+        k_shape = base_shape[:-1] + (k_dim,)
+        v_shape = base_shape[:-1] + (v_dim,)
         dsa_k_shape = (
             kernel_num_blocks,
             kernel_block_size,
