@@ -260,9 +260,11 @@ def test_reshape_single_tensor():
         block_size=128, num_kv_heads=4, head_size=128,
         dtype=torch.bfloat16, head_size_v=128,
     )
-    # spec.dtype is the physical storage dtype (int8), so compute raw size directly:
-    # (num_blocks, block_size, num_kv_heads, head_size) in int8
-    raw_bytes = 4 * 128 * 4 * 128  # = 262144 int8 bytes
+    # reshape does raw.view(spec.dtype).view(kv_cache_shape), so raw must
+    # contain product(kv_cache_shape) * dtype_bytes int8 elements.
+    # dtype = bfloat16 → 2 bytes per element.
+    shape_elements = 4 * 128 * 4 * 128  # kv_cache_shape product = 262144
+    raw_bytes = shape_elements * 2  # = 524288 int8 bytes
     raw = torch.zeros(raw_bytes, dtype=torch.int8)
 
     layout = SingleTensorLayout()
@@ -283,8 +285,10 @@ def test_reshape_split_kv():
         block_size=128, num_kv_heads=4, head_size=128,
         dtype=torch.bfloat16, head_size_v=128,
     )
-    # Each cache tensor: (num_blocks, block_size, num_kv_heads, head_size)
-    per_cache_bytes = 4 * 128 * 4 * 128  # = 262144 int8 bytes
+    # Each cache tensor must hold product(k_shape) * dtype_bytes int8 elements.
+    # dtype = bfloat16 → 2 bytes per element.
+    shape_elements = 4 * 128 * 4 * 128  # k_shape product = 262144
+    per_cache_bytes = shape_elements * 2  # = 524288 int8 bytes
     total = per_cache_bytes * 2  # K + V
     sizes = SplitKVLayout().split_sizes(total, spec, head_dims=(128, 128))
     raw_k = torch.zeros(sizes[0], dtype=torch.int8)
@@ -331,7 +335,11 @@ def test_reshape_sparse_mla():
         block_size=128, num_kv_heads=1, head_size=704,
         dtype=torch.bfloat16, sparse_head_dim=(512, 64, 128),
     )
-    total = (512 + 64 + 128) * 128 * 1 * 4  # int8 bytes for 4 blocks
+    # Each tensor: product(target_shape) * dtype_bytes int8 elements.
+    # dtype = bfloat16 → 2 bytes per element.
+    # k_shape=(4,128,1,512)=262144, v_shape=(4,128,1,64)=32768, dsa_k=(4,128,1,128)=65536
+    # total bf16 elements = 360448 → int8 bytes = 360448 * 2 = 720896
+    total = (512 + 64 + 128) * 128 * 1 * 4 * 2
     layout = spec.get_kv_cache_layout()
     sizes = layout.split_sizes(total, spec)
     raw = [torch.zeros(s, dtype=torch.int8) for s in sizes]
