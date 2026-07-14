@@ -3870,6 +3870,7 @@ class NPUModelRunner(GPUModelRunner):
         ``self.kv_caches`` regardless of multiprocess architecture.
         """
         import json
+        import os
 
         dump_path = os.environ.get("VLLM_ASCEND_DUMP_KV_CACHE")
         if not dump_path:
