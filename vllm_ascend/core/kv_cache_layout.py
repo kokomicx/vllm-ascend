@@ -299,6 +299,18 @@ class SplitKVLayout(KVCacheLayout):
                 layer_name, spec.dtype, vllm_config.model_config
             )
 
+        # DEBUG: trace SplitKVLayout reshape
+        import sys
+        print(f"[DEBUG SplitKVLayout] layer={layer_name}", file=sys.stderr, flush=True)
+        print(f"  len(raw_tensors)={len(raw_tensors)}", file=sys.stderr, flush=True)
+        print(f"  raw_tensors[0]: shape={raw_tensors[0].shape}, dtype={raw_tensors[0].dtype}, numel={raw_tensors[0].numel()}", file=sys.stderr, flush=True)
+        print(f"  k_dtype={k_dtype}, v_dtype={v_dtype}", file=sys.stderr, flush=True)
+        print(f"  k_shape={k_shape}, k_shape_numel={k_shape[0]*k_shape[1]*k_shape[2]*k_shape[3]}", file=sys.stderr, flush=True)
+        print(f"  kv_cache_shape={kv_cache_shape}, base_shape={base_shape}", file=sys.stderr, flush=True)
+        print(f"  k_dim={k_dim}, v_dim={v_dim}", file=sys.stderr, flush=True)
+        print(f"  num_blocks={num_blocks}, kernel_num_blocks={kernel_num_blocks}, kernel_block_size={kernel_block_size}", file=sys.stderr, flush=True)
+        print(f"  spec.num_kv_heads={spec.num_kv_heads}, spec.head_size={spec.head_size}", file=sys.stderr, flush=True)
+
         k_cache = raw_tensors[0].view(k_dtype).view(k_shape)
         v_cache = raw_tensors[1].view(v_dtype).view(v_shape)
         return (k_cache, v_cache)
