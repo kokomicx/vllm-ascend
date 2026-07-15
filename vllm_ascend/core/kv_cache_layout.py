@@ -207,11 +207,13 @@ class SingleTensorLayout(KVCacheLayout):
         **kwargs: Any,
     ) -> torch.Tensor:
         raw = raw_tensors[0]
+        cache_dtype_str: str = kwargs.get("cache_dtype_str", "")
         kv_cache_shape = backend.get_kv_cache_shape(
             kernel_num_blocks,
             kernel_block_size,
             spec.num_kv_heads,
             spec.head_size,
+            cache_dtype_str=cache_dtype_str,
         )
         return raw.view(spec.dtype).view(kv_cache_shape)
 
@@ -274,12 +276,14 @@ class SplitKVLayout(KVCacheLayout):
         head_dims: tuple[int, int] = kwargs["head_dims"]
         k_dim, v_dim = head_dims
         layer_name: str = kwargs.get("layer_name", "")
+        cache_dtype_str: str = kwargs.get("cache_dtype_str", "")
 
         kv_cache_shape = backend.get_kv_cache_shape(
             kernel_num_blocks,
             kernel_block_size,
             spec.num_kv_heads,
             spec.head_size,
+            cache_dtype_str=cache_dtype_str,
         )
         # FA3/Attention backends return (2, N, BS, H, D) with a leading 2×
         # K/V factor.  SplitKVLayout handles separate K/V tensors, so drop
@@ -298,18 +302,6 @@ class SplitKVLayout(KVCacheLayout):
             k_dtype, v_dtype = quant_config.get_kv_quant_dtype(
                 layer_name, spec.dtype, vllm_config.model_config
             )
-
-        # DEBUG: trace SplitKVLayout reshape
-        import sys
-        print(f"[DEBUG SplitKVLayout] layer={layer_name}", file=sys.stderr, flush=True)
-        print(f"  len(raw_tensors)={len(raw_tensors)}", file=sys.stderr, flush=True)
-        print(f"  raw_tensors[0]: shape={raw_tensors[0].shape}, dtype={raw_tensors[0].dtype}, numel={raw_tensors[0].numel()}", file=sys.stderr, flush=True)
-        print(f"  k_dtype={k_dtype}, v_dtype={v_dtype}", file=sys.stderr, flush=True)
-        print(f"  k_shape={k_shape}, k_shape_numel={k_shape[0]*k_shape[1]*k_shape[2]*k_shape[3]}", file=sys.stderr, flush=True)
-        print(f"  kv_cache_shape={kv_cache_shape}, base_shape={base_shape}", file=sys.stderr, flush=True)
-        print(f"  k_dim={k_dim}, v_dim={v_dim}", file=sys.stderr, flush=True)
-        print(f"  num_blocks={num_blocks}, kernel_num_blocks={kernel_num_blocks}, kernel_block_size={kernel_block_size}", file=sys.stderr, flush=True)
-        print(f"  spec.num_kv_heads={spec.num_kv_heads}, spec.head_size={spec.head_size}", file=sys.stderr, flush=True)
 
         k_cache = raw_tensors[0].view(k_dtype).view(k_shape)
         v_cache = raw_tensors[1].view(v_dtype).view(v_shape)

@@ -3621,6 +3621,7 @@ class NPUModelRunner(GPUModelRunner):
         kwargs: dict[str, Any] = {
             "head_dims": (k_dim, v_dim),
             "layer_name": layer_name,
+            "cache_dtype_str": self.cache_config.cache_dtype,
         }
         if enable_fa_quant(self.vllm_config):
             kwargs["quant_config"] = self.vllm_config.quant_config
