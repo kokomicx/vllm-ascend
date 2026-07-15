@@ -207,13 +207,11 @@ class SingleTensorLayout(KVCacheLayout):
         **kwargs: Any,
     ) -> torch.Tensor:
         raw = raw_tensors[0]
-        cache_dtype_str: str = kwargs.get("cache_dtype_str", "")
         kv_cache_shape = backend.get_kv_cache_shape(
             kernel_num_blocks,
             kernel_block_size,
             spec.num_kv_heads,
             spec.head_size,
-            cache_dtype_str=cache_dtype_str,
         )
         return raw.view(spec.dtype).view(kv_cache_shape)
 
@@ -276,14 +274,12 @@ class SplitKVLayout(KVCacheLayout):
         head_dims: tuple[int, int] = kwargs["head_dims"]
         k_dim, v_dim = head_dims
         layer_name: str = kwargs.get("layer_name", "")
-        cache_dtype_str: str = kwargs.get("cache_dtype_str", "")
 
         kv_cache_shape = backend.get_kv_cache_shape(
             kernel_num_blocks,
             kernel_block_size,
             spec.num_kv_heads,
             spec.head_size,
-            cache_dtype_str=cache_dtype_str,
         )
         # FA3/Attention backends return (2, N, BS, H, D) with a leading 2×
         # K/V factor.  SplitKVLayout handles separate K/V tensors, so drop
