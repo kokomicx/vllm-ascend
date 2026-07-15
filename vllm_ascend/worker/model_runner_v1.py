@@ -4331,8 +4331,8 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     # k_cache: nope_cache    v_cache: rope_cache
                     k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, kv_cache_spec)
-                    k_shape = kv_cache_shape[:-1] + [k_dim]
-                    v_shape = kv_cache_shape[:-1] + [v_dim]
+                    k_shape = kv_cache_shape[:-1] + (k_dim,)
+                    v_shape = kv_cache_shape[:-1] + (v_dim,)
 
                     k_cache_dtype = v_cache_dtype = kv_cache_spec.dtype
                     if enable_fa_quant(self.vllm_config):
