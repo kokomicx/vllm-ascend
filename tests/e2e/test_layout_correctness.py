@@ -50,6 +50,8 @@ def generate_and_capture(
     model: str,
     max_model_len: int,
     no_generate: bool = False,
+    tensor_parallel_size: int = 1,
+    gpu_memory_utilization: float = 0.30,
 ) -> dict[str, Any]:
     """Load a model, optionally run one short generation, capture KV cache metadata.
 
@@ -73,7 +75,8 @@ def generate_and_capture(
             max_model_len=max_model_len,
             max_num_seqs=4,
             enforce_eager=True,
-            gpu_memory_utilization=0.30,
+            gpu_memory_utilization=gpu_memory_utilization,
+            tensor_parallel_size=tensor_parallel_size,
             trust_remote_code=True,
         )
 
@@ -194,6 +197,8 @@ if __name__ == "__main__":
     parser.add_argument("--model", required=True)
     parser.add_argument("--output", default=None)
     parser.add_argument("--max-model-len", type=int, default=2048)
+    parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.30)
     parser.add_argument(
         "--no-generate",
         action="store_true",
@@ -202,7 +207,13 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    snapshot = generate_and_capture(args.model, args.max_model_len, no_generate=args.no_generate)
+    snapshot = generate_and_capture(
+        args.model,
+        args.max_model_len,
+        no_generate=args.no_generate,
+        tensor_parallel_size=args.tensor_parallel_size,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+    )
 
     output_path = args.output
     if output_path is None:

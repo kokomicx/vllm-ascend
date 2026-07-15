@@ -41,6 +41,8 @@ fi
 # ---------------------------------------------------------------------------
 SKIP_UNIT_TESTS=0
 MAX_MODEL_LEN=2048
+TENSOR_PARALLEL_SIZE=1
+GPU_MEMORY_UTILIZATION=0.30
 MODEL=""
 TMPDIR="${TMPDIR:-/tmp}"
 
@@ -50,6 +52,10 @@ while [[ $# -gt 0 ]]; do
             SKIP_UNIT_TESTS=1 ;;
         --max-model-len)
             MAX_MODEL_LEN="$2"; shift ;;
+        --tensor-parallel-size)
+            TENSOR_PARALLEL_SIZE="$2"; shift ;;
+        --gpu-memory-utilization)
+            GPU_MEMORY_UTILIZATION="$2"; shift ;;
         --tmpdir)
             TMPDIR="$2"; shift ;;
         -*)
@@ -112,6 +118,8 @@ export VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH=0
 python "$SCRIPT_DIR/test_layout_correctness.py" \
     --model "$MODEL" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
+    --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --output "$OLD_JSON" \
     --no-generate \
     || _err "Old-path snapshot failed"
@@ -127,6 +135,8 @@ export VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH=1
 python "$SCRIPT_DIR/test_layout_correctness.py" \
     --model "$MODEL" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
+    --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --output "$NEW_JSON" \
     --no-generate \
     || _err "New-path snapshot failed"
