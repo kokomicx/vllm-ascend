@@ -3735,12 +3735,23 @@ class NPUModelRunner(GPUModelRunner):
                     continue
 
                 raw = kv_cache_raw_tensors[layer_name]
-                layout = spec.get_kv_cache_layout()
 
                 # Normalize raw data to list[torch.Tensor]
+                raw_is_tuple = isinstance(raw, tuple)
                 raw_list: list[torch.Tensor] = (
-                    list(raw) if isinstance(raw, tuple) else [raw]
+                    list(raw) if raw_is_tuple else [raw]
                 )
+
+                # Detect allocation-reshape layout mismatch for hybrid
+                # mamba+attention models.  When attention and mamba layers
+                # share the same physical buffer, allocation uses
+                # SingleTensorLayout (one flat buffer), but
+                # spec.get_kv_cache_layout() would return SplitKVLayout.
+                # Match the layout to the actual tensor format.
+                if isinstance(spec, AttentionSpec) and not raw_is_tuple:
+                    layout: KVCacheLayout = SingleTensorLayout()
+                else:
+                    layout = spec.get_kv_cache_layout()
                 total_raw_bytes = sum(t.numel() for t in raw_list)
                 num_blocks = total_raw_bytes // spec.page_size_bytes
 
