@@ -78,7 +78,16 @@ MODEL_NAME="$(basename "$MODEL")"
 OLD_JSON="$TMPDIR/kv_cache_${MODEL_NAME}_gate0.json"
 NEW_JSON="$TMPDIR/kv_cache_${MODEL_NAME}_gate1.json"
 
-export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0}"
+# Auto-derive visible devices from tensor_parallel_size
+if [[ "$TENSOR_PARALLEL_SIZE" -gt 1 ]]; then
+    _devices="0"
+    for ((i = 1; i < TENSOR_PARALLEL_SIZE; i++)); do
+        _devices="$_devices,$i"
+    done
+    export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-$_devices}"
+else
+    export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0}"
+fi
 
 echo ""
 echo "============================================================"
