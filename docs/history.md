@@ -465,3 +465,9 @@ vllm-ascend/
 - k8s-node-48 上的标准 MLA 真实生成比较已输出 `[PASS] All 27 layers match (shape + dtype + contiguous)` 和 `Generated token IDs: identical (8 tokens)`。gate=0 与 gate=1 均为 `/mnt/weight/DeepSeek-V2-Lite-W8A8`，生成文本同为 `”\n“I’m fine,`。
 - 27 层 cache 均为双 tensor MLA 结构，示例层形状为 `[8878, 128, 1, 512]`（KV latent，匹配 `kv_lora_rank=512`）与 `[8878, 128, 1, 64]`（RoPE 分量）；gate=0/1 的 tensor count、shape、dtype 和连续性均一致。由此标准 MLA 的真实 NPU 正确性闭环完成：单测、metadata parity、固定输入 token ID parity 均已具备。
 - `swigvarlink` 的 `DeprecationWarning` 为非阻塞第三方弃用警告，不影响比较结论。保留 `/tmp/kv_mla_baseline_layout` 和 `/tmp/kv_mla_baseline_tokens` 下 JSON/log 作为 PR 验证附件来源。
+
+### 2026-07-16：Sparse MLA 候选模型选择
+
+- k8s-node-48 上进入 Sparse MLA 的首选候选为 `/mnt/weights/GLM-5.1-w8a8`。它可能覆盖 Sparse/DSA attention cache 的 K、V 与 indexer 等额外物理 buffer；但模型目录中的 W8A8 只是权重格式，不能据此推断 C8 KV cache，也不能单凭名称标记 Sparse MLA 已验证。
+- `/mnt/weight/DeepSeek-V2-Lite-W8A8` 已作为标准 MLA 通过，不覆盖 Sparse MLA；当前 DeepSeek V3.1 候选也属于标准 MLA 验证路径。DeepSeek V3.2 是 node-51 上的 Sparse MLA bf16 候选，但当前受 checkpoint/多卡环境问题影响，不作为首轮选择。
+- GLM-5.1 之前在 k8s-node-48 的 TP=1 在 FusedMoE 权重加载阶段 OOM，发生在 KV cache 初始化前、与 Layout 无关。下一步先读取其 config 并进行小规模/多卡容量预检；只有启动 snapshot 确认实际存在 sparse indexer cache 后，才以 metadata A/B 和 token ID A/B 标记 SparseMLALayout 覆盖。C8 scale-cache 和 Compressed MLA 仍需各自的模型与环境，不能由此次 GLM 结果替代。
