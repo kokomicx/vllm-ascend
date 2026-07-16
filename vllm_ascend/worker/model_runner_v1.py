@@ -3799,6 +3799,14 @@ class NPUModelRunner(GPUModelRunner):
             logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
+        # Keep this consistent with the legacy path. Hamming-sparse cache
+        # initialization below needs the same value for DeepSeek V4 as well.
+        num_attn_module = (
+            2
+            if self.model_config.hf_text_config.model_type == "longcat_flash"
+            else 1
+        )
+
         # --- DS V4 ordering or bind_kv_cache ---
         if self.model_config.hf_text_config.model_type == "deepseek_v4":
             from vllm_ascend.utils import extract_dsv4_layer_index
@@ -3821,11 +3829,6 @@ class NPUModelRunner(GPUModelRunner):
         else:
             from vllm.v1.worker.utils import bind_kv_cache
 
-            num_attn_module = (
-                2
-                if self.model_config.hf_text_config.model_type == "longcat_flash"
-                else 1
-            )
             bind_kv_cache(
                 kv_caches,
                 self.compilation_config.static_forward_context,

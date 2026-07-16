@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, PropertyMock, patch
 
@@ -386,6 +387,31 @@ def test_v2_imports_cleanly():
     print("✓ v2 code imports cleanly")
 
 
+def test_v2_deepseek_v4_hamming_sparse_uses_single_attn_module():
+    """DeepSeek V4 hash-cache setup must receive a defined module count."""
+    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+    runner = MagicMock()
+    runner._allocate_kv_cache_tensors_v2.return_value = []
+    runner._reshape_kv_cache_tensors_v2.return_value = {"layers.0": MagicMock()}
+    runner.shared_kv_cache_layers = {}
+    runner.model_config.hf_text_config = SimpleNamespace(
+        model_type="deepseek_v4", num_hidden_layers=1,
+    )
+    runner.kv_caches = []
+    runner.compilation_config.static_forward_context = {
+        "layers.0": SimpleNamespace(kv_cache=None),
+    }
+    runner.enable_hamming_sparse = True
+
+    with patch("vllm_ascend.worker.kvcomp_utils.init_and_bind_hashk_cache") as hash_init:
+        NPUModelRunner._initialize_kv_cache_tensors_v2(
+            runner, MagicMock(), [],
+        )
+
+    assert hash_init.call_args.kwargs["num_attn_module"] == 1
+
+
 if __name__ == "__main__":
     test_v2_methods_exist()
     test_alloc_aligned()
@@ -406,5 +432,6 @@ if __name__ == "__main__":
     test_reshape_sparse_mla()
     test_needs_alignment()
     test_v2_imports_cleanly()
+    test_v2_deepseek_v4_hamming_sparse_uses_single_attn_module()
     print("\n" + "=" * 50)
     print("ALL PHASE 3 TESTS PASSED")

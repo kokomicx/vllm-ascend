@@ -211,3 +211,26 @@ vllm-ascend/
 4. 询问用户：**"当前验证到哪个模型了？有没有遇到报错？"**
 5. 如果验证已通过：下一步是清理旧代码（Task 3 代码清理）和算子对齐（Task 2）
 6. 如果验证遇到问题：对比新旧路径的 JSON snapshot，定位 shape/dtype 差异
+
+### 2026-07-15: Conversation status sync
+
+- Re-read and confirmed the baseline: the Phase 2-3 layout-driven KV-cache refactor is ready behind a feature gate; NPU-server E2E comparison of the old and new paths remains pending.
+- The current environment still lacks `_C_ascend.npu_scatter_pa_kv_cache_vllm`. `--no-generate` can verify initialization-time KV-cache shape, dtype, and tensor-count parity; full generation needs an environment with that operator.
+- Ongoing convention: append the key conclusions, code changes, test results, and blockers from each conversation to this file.
+
+### 2026-07-15：PR 准备基线（以最新审计报告为准）
+
+- 工作方式：在本地修改并 `git push` 到个人代码仓；NPU 服务器执行 `git pull` 后进行模型测试。最终目标是提交可合并的 vllm-ascend PR，并处理至代码评审通过。
+- 当前分支：`feature/layout-refactor-phase3`。本地工作区除本历史文件外干净；最近提交仍包含调试性质提交，最终提 PR 前需要整理为 2–4 个语义清晰、带 Signed-off-by 的 Conventional Commit。
+- 已在真机验证：`SingleTensorLayout` 和 `MambaLayout`（Qwen3.5-2B）。`SplitKVLayout` 已在 DS V2-Lite 跑过，但 `num_blocks` 存在 1 的差异，需先确认是否为环境波动。`SparseMLALayout`、`SparseMLAC8Layout`、`CompressedMLALayout` 尚未在 node-51 完成验证，是当前最高验证风险。
+- P0 代码缺陷：`_initialize_kv_cache_tensors_v2` 在 `model_type == "deepseek_v4"` 且 `enable_hamming_sparse=True` 时可能未定义 `num_attn_module`，会触发 `UnboundLocalError`。需将该变量的定义移至模型类型 if/else 之前，并与旧路径保持一致。
+- P0 验证缺口：现有 E2E 仅比对 KV cache 元数据；需增加 gate=0 与 gate=1 对同一 prompt 的生成 token 序列一致性（或等价的 KV tensor 数值容差比较）。
+- 高优先级评审清理：将旧 reshape 路径中 4 处逐层 `logger.warning` 降为 `debug`/移除；消除 `model_runner_v1.py` 与 `kv_cache_layout.py` 中 `_adjust_kv_layout` 的重复；为 4 个旧分配/reshape 函数标注 feature-gate 移除后的 deprecation 计划；提取 SparseMLA 与 SparseMLAC8 共用 reshape 基础逻辑。
+- PR 前质量门槛：补充 layout 边界单测；在 `.github/workflows/scripts/test_config.yaml` 注册新增/修改源码和测试文件；运行 `pre-commit run --all-files` 与 `bash format.sh ci`；准备 `[Refactor]` 前缀的 PR 标题、测试证据和说明。
+
+### 2026-07-15：P0 修复 — DeepSeek V4 hamming-sparse 模块数
+
+- 已修复 `_initialize_kv_cache_tensors_v2` 的作用域缺陷：将 `num_attn_module`（`longcat_flash` 为 2，其余模型为 1）移到 DeepSeek V4 专用排序/绑定分支之前计算。这样 `model_type == "deepseek_v4"` 且 `enable_hamming_sparse=True` 时，`init_and_bind_hashk_cache` 能获得定义明确的值 1，不再触发 `UnboundLocalError`；与旧路径语义一致。
+- 已在 `tests/test_phase3_layout_dispatch.py` 增加回归测试：以最小 mock 走 DeepSeek V4 + hamming-sparse 的 V2 初始化分支，并断言 hash-cache 初始化收到 `num_attn_module=1`。
+- 本地验证：`python -m py_compile vllm_ascend/worker/model_runner_v1.py tests/test_phase3_layout_dispatch.py` 和 `git diff --check` 均通过。`python -m pytest tests/test_phase3_layout_dispatch.py -q` 在收集阶段因本机 Python 缺少 `torch` 失败，尚未运行任何测试；需在安装 vLLM/torch 的服务器环境执行该命令。
+- 待提交文件：`vllm_ascend/worker/model_runner_v1.py`、`tests/test_phase3_layout_dispatch.py`，以及本历史文件。
