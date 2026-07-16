@@ -418,3 +418,8 @@ vllm-ascend/
 - DeepSeek-V3.1-W4A8 的 88 shard 加载使单轮 metadata A/B 验证耗时约一小时以上，不适合优先建立快速正确性闭环。若运行仍处于权重加载阶段且未生成 snapshot，可在当前交互终端以一次 `Ctrl+C` 正常停止，避免使用 `kill -9`；停止不会损坏 checkpoint。
 - 当前 node-51 顶层模型清单未明确列出小型标准 MLA：Qwen 系列主要用于 GQA/Hybrid，DeepSeek V3.1/R1/V3.2 级候选体量较大（V3.2 还属于后续 Sparse MLA 范畴）。首选仍是 k8s-node-48 的 `DeepSeek-V2-Lite-W8A8`，或先在 node-51 的 `/mnt` 下定位是否存在同名/等价 V2-Lite 目录后再启动。
 - 仅在找到小型 DeepSeek V2/Lite MLA 候选并通过 `config.json` 的 `model_type`、`kv_lora_rank` 预检后，才替换模型路径执行既定 metadata 与 token ID 流程；不得用小型 Qwen GQA 模型替代标准 MLA 覆盖。
+
+### 2026-07-16：恢复 k8s-node-48 的 DeepSeek-V2-Lite 标准 MLA 验证
+
+- node-51 未找到小型 DeepSeek V2/Lite MLA 候选，故标准 MLA 验证回到 k8s-node-48 的 `/mnt/weight/DeepSeek-V2-Lite-W8A8`。在重新确认 Phy-ID `3` 空闲且服务器工作区与推送分支一致后，使用 TP=1、`max-model-len=2048`、`gpu-memory-utilization=0.80`。
+- 为规避此前普通顺序中全局 block 向下取整的 8880/8881 边界波动，metadata 与生成测试均显式采用 gate=1 先启动、gate=0 后启动的逆序。每一阶段分别保存 gate1-first 与 gate0-second JSON；生成阶段直接以 `--require-generated-token-ids` 比较器参数要求 token 序列逐项相同。运行相关单测后不再调用默认脚本的固定旧后新顺序。
