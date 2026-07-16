@@ -385,3 +385,8 @@ vllm-ascend/
 - 标准 MLA 首选 k8s-node-48 的 `/mnt/weight/DeepSeek-V2-Lite-W8A8`，先使用一张经 `npu-smi info` 确认空闲的 Phy-ID（建议 `3`）和 TP=1。W8A8 是权重量化标签，不代表 Sparse MLA C8；该模型用于隔离验证标准 MLA 的 K/V/rope cache 切分和 reshape。
 - 在服务器执行前先检查 `git status --short`、当前分支与 HEAD；只有工作区干净时才 `git pull --ff-only`，确保测试代码与已推送分支一致。不得以包含未提交模型 runner/layout 改动的工作区作为 PR 正确性证据。
 - 以 `max-model-len=2048`、`gpu-memory-utilization=0.80` 先运行含单测的默认 metadata A/B，再在独立目录运行 `--skip-unit-tests --generate` 的 token ID A/B；成功必须同时包含 metadata comparator 通过、token IDs identical 与 `[PASS] ALL CHECKS PASSED`。
+
+### 2026-07-16：DeepSeek-V2-Lite-W8A8 的 MLA 配置确认
+
+- 模型 `config.json` 显示 `model_type=deepseek_v2`、`architectures=[DeepseekV2ForCausalLM]`、`num_hidden_layers=27`、`kv_lora_rank=512`、`q_lora_rank=None`。该组合仍是标准 MLA：`kv_lora_rank` 是 KV latent compression 的关键配置，512 维 KV latent cache 需要配合 RoPE 分量参与注意力计算。
+- `q_lora_rank` 控制的是 Query 投影是否采用可选的 Q-LoRA 低秩分解，与是否使用 MLA 无关。值为 `None` 仅表示 Query 使用普通投影，不能据此否定 MLA。该模型继续作为标准 MLA gate=0/1 metadata 与 token ID 验证的合适候选。
