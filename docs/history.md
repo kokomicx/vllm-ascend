@@ -439,3 +439,8 @@ vllm-ascend/
 
 - 若在 node-51 上继续标准 MLA 测试，模型使用 `/mnt/weight/DeepSeek-V3.1-w4a8-perchannle`，卡选择固定为空闲 Phy-ID `6,7,10,11,12,13,14,15`，对应 TP=8；所有 gate=0/1 命令必须使用同一可见卡列表、TP、`max-model-len=2048` 和 `gpu-memory-utilization=0.80`。
 - 验证采用两阶段逆序流程：先以 gate=1、后 gate=0 的 `--no-generate` snapshot 做 metadata 比较；该阶段通过后以同样顺序进行真实生成，并使用 `--require-generated-token-ids` 比较。因 V3.1 的权重为 88 shard，每个阶段都可能耗时数十分钟；目录创建和 `set -euo pipefail` 是必需项，避免因缺少 JSON 而误判。
+
+### 2026-07-16：k8s-node-48 空闲后恢复 V2-Lite MLA 测试
+
+- 最新 k8s-node-48 的 `npu-smi info` 显示 NPU 0--7、Phy-ID 0--15 均无用户进程；可安全选择 Phy-ID `0` 作为 DeepSeek-V2-Lite-W8A8 的 TP=1 验证卡（仍须在启动前即时复查资源和遵守服务器预约约定）。
+- 为避免 node-51 V3.1 的 88-shard 长加载，恢复 `/mnt/weight/DeepSeek-V2-Lite-W8A8`（4 shard）的标准 MLA 逆序 A/B：使用 `ASCEND_RT_VISIBLE_DEVICES=0`、TP=1、`gpu-memory-utilization=0.80`，并预先创建 `/tmp/kv_mla_node48_layout` 与 `/tmp/kv_mla_node48_tokens`。两阶段均按 gate=1 后 gate=0 执行；生成阶段比较器必须带 `--require-generated-token-ids`。
