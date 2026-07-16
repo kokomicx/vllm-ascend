@@ -319,3 +319,9 @@ vllm-ascend/
 
 - 已提交并推送 `19b8f52 test(kv_cache): compare generated token IDs across layout paths` 至 `myfork/feature/layout-refactor-phase3`。推送时 PowerShell 无法解析既有 SSH 代理的 Unix `exec`，改用 Git Bash 后推送成功。
 - 后续工作约定：每次完成并验证本任务相关代码后，仅暂存任务涉及的文件（排除无关临时文件），使用 `git commit -s` 创建语义化提交，并推送至该远程分支。
+
+### 2026-07-16：GQA/Hybrid 闭环前置验证状态
+
+- k8s-node-48 已运行更新后的 `python -m pytest tests/test_phase3_layout_dispatch.py -q`，结果为 `21 passed, 17 warnings in 12.58s`。新增 token ID 比较器的回归用例已通过；17 条均为 PyTorch/OpenTelemetry/SWIG 弃用警告，非失败项。
+- 该服务器的模型分工：`/mnt/weights/Qwen3-30B-A3B` 是纯 GQA（`SplitKVLayout`）首选；`/mnt/weights/Qwen3.5-2B` 用于 Hybrid（attention `SplitKVLayout` + `MambaLayout`）；DeepSeek V2-Lite/V3.1 是 MLA，不用于当前第一阶段的 GQA/Hybrid 闭环。
+- 首轮建议 GQA 使用 Qwen3-30B-A3B 的 TP=1（若单卡权重/显存不足则再提升 TP），并分别运行默认初始化布局模式与 `--generate` token ID 严格对比模式；随后用 Qwen3.5-2B 重复同一流程。
