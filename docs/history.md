@@ -518,3 +518,8 @@ vllm-ascend/
 
 - 用户再次提供的最新 `npu-smi info` 中，PID `2841539--2841566` 仍显示为当前占满全部 16 张 Phy-ID 的 vLLM worker；应立刻在同一台主机执行 `ps -ww -o user:20,uid:8,pid,ppid,lstart,etime,args -p <逗号分隔PID列表>`。其中 `USER` 即启动该 Linux 进程的账号，`UID`、完整命令行、启动时间和父 PID 可用于核对归属。
 - 对任一仍存活 PID，可读取 `/proc/<pid>/cwd`、`/proc/<pid>/cmdline`、`/proc/<pid>/cgroup`，并用不依赖 `pstree` 的 PPID 循环追溯父链；这可定位工作目录、启动入口及容器/调度 cgroup。若显示账号为 `root`，它只能说明服务账号，具体自然人仍需结合容器、调度器或集群审计记录确认。不得自行终止他人作业。
+
+### 2026-07-16：第二次实时查询确认 worker 已退出
+
+- 用户对最新截图中的完整 PID 列表运行了 `ps -p`，并枚举全部 `VLLMWorker`/`EngineCore`/`vllm` 进程，均无输出；对 PID 2841539 的 `/proc` 父链循环同样未进入。这三项只读查询一致证明：在命令执行时，该批 worker 已不存在，不能从已失效 PID 读取启动用户、命令或父链。
+- 下一次排查必须在同一 SSH 会话中连续执行 `npu-smi info` 与 `ps`，不要使用之前的截图/PID；若新 `npu-smi` 仍显示占卡而 `ps` 立即为空，应保存带完整时间的两份原始输出并请管理员核对 NPU 驱动、容器 PID namespace 或调度器视图。仅凭本次 PID 消失仍不能归因于某个用户的 kill 操作。
