@@ -423,3 +423,9 @@ vllm-ascend/
 
 - node-51 未找到小型 DeepSeek V2/Lite MLA 候选，故标准 MLA 验证回到 k8s-node-48 的 `/mnt/weight/DeepSeek-V2-Lite-W8A8`。在重新确认 Phy-ID `3` 空闲且服务器工作区与推送分支一致后，使用 TP=1、`max-model-len=2048`、`gpu-memory-utilization=0.80`。
 - 为规避此前普通顺序中全局 block 向下取整的 8880/8881 边界波动，metadata 与生成测试均显式采用 gate=1 先启动、gate=0 后启动的逆序。每一阶段分别保存 gate1-first 与 gate0-second JSON；生成阶段直接以 `--require-generated-token-ids` 比较器参数要求 token 序列逐项相同。运行相关单测后不再调用默认脚本的固定旧后新顺序。
+
+### 2026-07-16：DeepSeek-V2-Lite 生成阶段中断，尚不能判定 token 正确性
+
+- gate=0 运行日志已证明 4 个 safetensors shard 成功加载（15.30 GiB 权重）、ASCEND_MLA backend 以 block size 128 初始化、27 层 KV cache metadata dump 成功，且可用 KV memory 为 32.97 GiB；这说明模型加载和 MLA cache 初始化未报错。
+- 随后进程仅显示 `Killed`，比较器又报告缺少 `/tmp/kv_mla_reverse_tokens/gate0_second.json`。用户确认 token 阶段输出目录未事先创建；目录缺失会解释最终 JSON/日志不存在和 comparator 的 `Errno 2`，但不能单独解释无 traceback 的 `Killed`，应将其视为待复现的进程异常（可能为宿主/cgroup OOM 或外部终止）。
+- 因为没有形成 gate=0、gate=1 两份完整生成 snapshot，也没有执行 `--require-generated-token-ids` 的成功比较，本轮不能作为 MLA 精度/token parity 通过证据。重试前必须用 `mkdir -p /tmp/kv_mla_reverse_tokens_retry` 创建新目录并验证可写；若在目录正确时再次出现 `Killed`，立即收集 `dmesg -T` 中 OOM/killed-process 信息和完整终端日志后再调整资源参数。
