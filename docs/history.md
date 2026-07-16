@@ -507,3 +507,9 @@ vllm-ascend/
 - k8s-node-48 最新 `npu-smi info` 显示 16 张 Phy-ID 0--15 均被 `VLLMWorker_DP` 占用，PID 为 2841539--2841566，单卡约 38--45 GiB HBM；PID 范围连续且覆盖所有 NPU，表明这是一个多卡 vLLM data-parallel 作业，而非多个独立小作业。
 - 排查当前作业归属应只读地将 PID 映射到 Linux `USER`/`UID`、`PPID`、完整命令行、启动时间、cwd 及父进程树；如作业运行在容器/Kubernetes 环境，还应读取 `/proc/<pid>/cgroup` 映射到容器或调度器 job。此操作能确认当前作业的启动账号/服务账号和来源。
 - 当前 `npu-smi` 与 `ps` 元数据不能追溯证明谁曾 kill 另一进程；只有预先启用的 Linux auditd/audit rule、Kubernetes/调度器事件、sudo/journal 记录或作业平台审计才可能保留操作者证据。处理方式应先保存只读证据并向资源管理员/作业所有者核实，禁止自行 kill 对方进程。
+
+### 2026-07-16：共享 NPU 作业 PID 已失效
+
+- 对此前 `npu-smi` 快照中的 PID 2841539--2841566 执行 `ps` 时未返回任何进程，`/proc/2841539` 也不存在；这证明这些 worker 在查询前已退出，且不是权限拒绝。之前的 NPU 输出是历史快照，不能再用已失效 PID 追查当前所有者。
+- 该作业可能正常结束、启动异常退出或被停止；仅凭 PID 消失不能判定原因或操作者。`pstree: command not found` 仅表示当前镜像没有安装该辅助工具，与进程状态无关。
+- 后续应先立即刷新 `npu-smi info`，再对其显示的当前 PID 使用 `ps -ww -o user,uid,pid,ppid,lstart,etime,args` 取证；也可直接枚举所有当前 vLLM/EngineCore worker 进程。没有预先启用审计时，已退出进程的所属用户只能通过调度器、容器或系统日志间接追溯。
