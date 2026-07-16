@@ -544,3 +544,8 @@ vllm-ascend/
 - `/home/weight/GLM-5-w4a8` 为当前唯一已确认的真实 Sparse MLA/DSA 候选：`model_type=glm_moe_dsa`、`architectures=GlmMoeDsaForCausalLM`、78 层、`q_lora_rank=2048`、`kv_lora_rank=512`，且有 `index_head_dim=128`、`index_n_heads=32`、`index_topk=2048`、`indexer_rope_interleave=True`。目录实测 392G，比 `/mnt/weights/GLM-5.1-w8a8` 的 713G 小约 45%，应替换后者作为首轮 `SparseMLALayout` 真实 NPU/token parity 基线。
 - `Qwen3-8B`（16G）为普通 Qwen3、`Qwen3-30B-A3B-W8A8`（30G）为 Qwen3 MoE；后者的 `decoder_sparse_step` 不能替代 DSA/indexer cache，二者均无 MLA `kv_lora_rank`。Kimi Eagle、Qwen Eagle3 均为 1 层/草稿模型；DeepSeek MTP/random 与 `deepseek-v3.1-w4a8-puring` 仅为 4--5 层 MLA 辅助/随机模型，不是 Sparse MLA 主模型；Kimi-W4A8 和 MiniMax 目录大小为 0，当前权重不完整或仅有元数据。因此这些小目录不能作为 SparseMLALayout 主路径的上线证据。
 - 为优先保证首次超大 MoE 启动成功，若 16 张卡都由本作业独占，先采用 TP=16、`max-model-len=2048`、`gpu-memory-utilization=0.80`；392G 权重平均约 24.5G/卡，可为 MoE activation 和 Sparse KV cache 留出明确余量。验证目标是 gate=1 与 gate=0 的真实生成 snapshot metadata/token ID 严格一致，不主张性能提升。
+
+### 2026-07-16：GLM-5-W4A8 Sparse MLA 真实生成 A/B 执行流程
+
+- 在 k8s-node-48 先重新运行 `npu-smi info`，仅在 Phy-ID 0--15 确认均空闲且本作业获准独占时启动。固定 `MODEL=/home/weight/GLM-5-w4a8`、`ASCEND_RT_VISIBLE_DEVICES=0,1,...,15`、TP=16、`max-model-len=2048`、`gpu-memory-utilization=0.80`，并把 OMP/MKL/OpenBLAS/NUMEXPR 线程数设为 1、关闭 tokenizer 并行。
+- 先运行 Phase 3 单测；之后在可写的 `/tmp/kv_glm5_w4a8_sparse_tokens` 内执行两次真实生成：gate=1 先保存 `gate1_first.json/log`，gate=0 后保存 `gate0_second.json/log`。使用 `set -euo pipefail` 确保第一次启动失败时不继续，最终以 `compare_kv_cache_shapes.py --require-generated-token-ids` 同时严格检查所有层的 cache metadata 和 token ID；成功标准不是仅有模型启动或文本表面相同，而是 comparator 以 0 退出并报告 token IDs identical。
