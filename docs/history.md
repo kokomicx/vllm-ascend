@@ -349,3 +349,9 @@ vllm-ascend/
 - 使用 TP=2、`gpu_memory_utilization=0.80` 后，gate=0/1 已可完成加载并进入 JSON snapshot 比较；96 项失败恰好对应 48 个 attention layer 的 K/V 两个 tensor。
 - 所有差异均为 shape 第 0 维：旧路径 `[3301, 128, 2, 128]`，新路径 `[3302, 128, 2, 128]`；其余维度、容器、dtype 和连续性均未报告差异。这说明 K/V 拆分语义未发现不一致，差异集中在 vLLM 根据各次独立启动时 profiling 的可用内存向下取整得到的全局 KV block 数量，且仅跨越一个 block 边界。
 - 该现象目前不能直接认定为 Layout 逻辑错误，也不能为让测试通过而放宽 comparator 的 shape 比较；否则会掩盖真实容量回归。应先以 gate=1 先启动、gate=0 后启动的逆序复测，观察 block 数量是否随启动顺序改变；随后为 E2E harness 增加并使用相同的 `num_gpu_blocks_override`，在固定 block 容量下比较实际物理布局和生成 token ID。此项完成前，GQA metadata parity 不得标为通过。
+
+### 2026-07-16：Qwen3-30B-A3B GQA metadata parity 已通过
+
+- 按逆序执行（先 gate=1，后 gate=0）后，comparator 输出 `[PASS] All 48 layers match (shape + dtype + contiguous)`。两份 snapshot 的 `kv_cache_0[0]` 均为 `[3301, 128, 2, 128]`，并且所有 48 层的 K/V tensor 均一致；这为 `SplitKVLayout` 的实际 NPU metadata 等价提供了首个端到端证据。
+- 两次 profiling 的 `Available KV cache memory` 分别为 `19.35 GiB`（gate=1 先启动）和 `19.34 GiB`（gate=0 后启动）。该约 0.01 GiB 的独立进程可用内存波动足以跨越一个全模型 KV block 的向下取整边界，解释了此前顺序运行中观察到的 3301/3302 单 block 差异；逆序测试未发现 gate 相关的稳定布局差异。
+- 当前输出中的 `Generated token IDs: skipped` 符合本轮 `--no-generate` 的预期，不是失败。下一步必须在单独临时目录使用 `--generate` 运行同一 GQA gate=0/1 流程，并要求 generated token ID 逐项一致；通过后才能宣称 GQA 的端到端正确性闭环完成。
