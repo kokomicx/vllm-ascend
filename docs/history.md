@@ -489,3 +489,9 @@ vllm-ascend/
 - 最新 k8s-node-48 `npu-smi` 显示 Phy-ID 0--15、NPU 0--7 全部无用户进程。GLM-5.1 的正式验证使用 `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15` 与 TP=16；这是基于 713G 权重容量的首选方案。
 - 两条路径均固定 `max-model-len=2048`、TP=16、`gpu_memory_utilization=0.90`。相较先前估算的 0.80，0.90 使每张 64 GiB 卡的 vLLM 总预算约为 55 GiB，为约 44.6 GiB/卡的平均权重、activation 与 Sparse KV cache 留出更稳妥空间；最终仍以 worker 实际 cache budget 日志为准。
 - 为节省加载时间，只执行两次真实生成 snapshot：gate=1 先、gate=0 后；在预先创建且可写的 `/tmp/kv_glm_sparse_tokens` 下保存 JSON/log，随后比较器以 `--require-generated-token-ids` 同时严格检查 78 层 Sparse cache metadata 和 token 序列。期待每层出现三项 Sparse MLA cache（K、V、indexer）；任何权重 OOM、HCCL 或 cache budget 失败均应停止后收集完整日志，不进行第二条路径。
+
+### 2026-07-16：企业 vLLM 部署与服务性能评估原则
+
+- 大模型权重加载、TP/HCCL 初始化、KV cache 分配和 warmup 属于冷启动/发布路径，而非稳态在线请求路径。企业部署通常用多副本路由、rolling/blue-green/canary 发布和 readiness gate 保留旧副本直到新副本完整 warmup；生产容量设置最小热副本或 warm pool，自动扩缩容只应处理可容忍冷启动的流量。共享/网络存储上可评估 safetensors `prefetch` 或 `eager`（须评估 CPU RAM）以及与 TP 匹配的预分片 checkpoint，降低启动 IO；避免将 713G 模型的完整冷启动暴露给终端用户。
+- 在线服务的核心 SLO 应分解为 TTFT（含排队和 prefill 的首 token 延迟）、TPOT/ITL（逐 token 延迟和抖动）、E2EL、成功率/超时率和 P50/P95/P99，而非只报单请求 tokens/s。容量侧同时记录请求/输出/总 token 吞吐、并发、queue wait、KV cache usage/preemption/eviction、NPU 利用率与显存余量；以满足 TTFT/TPOT/E2EL SLO 的 goodput 而非峰值吞吐作为扩容和优化决策。
+- 对本 KV layout 重构的评审性能证据，应在相同模型、权重、TP、设备、max-model-len、batch/到达率和采样参数下比较 gate=0/1：正确性先由 token parity 确认，再报告 TTFT、TPOT/ITL、E2EL 的 P50/P99、output/total token throughput、错误率和 KV cache block 容量。无统计显著的改善时，PR 仅主张无回归与可维护性，不能宣称吞吐优化。
