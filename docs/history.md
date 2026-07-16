@@ -367,3 +367,9 @@ vllm-ascend/
 - 下一目标为 `/mnt/weights/Qwen3.5-2B` 的 Hybrid 闭环，用于同时覆盖 attention 的 `SplitKVLayout` 和线性 attention/Mamba 的 `MambaLayout`。在 k8s-node-48 上先复查资源后选一张空闲 Phy-ID（首选 `2`），TP=1。
 - 第一阶段以 `max-model-len=2048`、`gpu-memory-utilization=0.80` 运行不带 `--generate` 的验证脚本（不跳过单测），保存 `/tmp/kv_hybrid_layout/` 的 gate=0/1 snapshot 并要求 metadata comparator 通过。第二阶段使用独立的 `/tmp/kv_hybrid_tokens/`，带 `--skip-unit-tests --generate` 运行，要求生成 token ID 严格一致。
 - 成功后保存两套 JSON 和完整终端末尾输出；若 metadata 仅出现全层一致的单 block 差异，按 GQA 的方法进行逆序启动复测，而不得修改 comparator 容忍该差异。若 `--generate` 缺失 Ascend scatter 算子，则记录为环境阻塞，不能以 `--no-generate` 代替 token 正确性结论。
+
+### 2026-07-16：Qwen3.5-2B Hybrid 端到端 token parity 已通过
+
+- 在 k8s-node-48 上完成 `/mnt/weights/Qwen3.5-2B` 的 gate=0/1 `--generate` 验证。comparator 输出 `[PASS] All 24 layers match (shape + dtype + contiguous)` 及 `Generated token IDs: identical (8 tokens)`，脚本最终输出 `[PASS] ALL CHECKS PASSED`。
+- snapshot 显示 Hybrid cache 形态已被实际覆盖：部分层为包含 `[5858, 3, 6144]` 与 `[5858, 16, 128, 128]` 的双 state tensor list（线性 attention/Mamba），另一些层为 `[2, 29290, 128, 2, 256]` 的 attention tensor；gate=0 与 gate=1 对所有 24 层保持一致。
+- 两侧生成文本均为 `\n\n!!!!!!!`，对应的 8 个 token ID 严格相同。该文本本身不用于评价模型任务质量；在固定 prompt、seed 和 `temperature=0` 下，token ID 等价是本次 Layout 重构的正确性判据。GQA 与 Hybrid 的首轮真实 NPU 正确性闭环现均已完成。
