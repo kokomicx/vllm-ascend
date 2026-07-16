@@ -337,3 +337,9 @@ vllm-ascend/
 - 纯 GQA 首轮使用 `/mnt/weights/Qwen3-30B-A3B`。考虑到 30B 权重在 64 GiB 单卡上的余量较小，首选空闲 Phy-ID `0,1`、TP=2；先在默认 `--no-generate` 模式执行含单测的 KV metadata A/B，再以独立临时目录执行 `--generate --skip-unit-tests` 的 token ID 严格 A/B。
 - Hybrid 随后使用 `/mnt/weights/Qwen3.5-2B`，使用空闲 Phy-ID `2`、TP=1，以相同的 metadata 与生成 token ID 两阶段流程验证。两次运行均固定 `max-model-len=2048`、`gpu-memory-utilization=0.10`，并保留 gate=0/1 JSON snapshot 作为 PR 证据。
 - 成功判据必须包含脚本末尾的 `[PASS] ALL CHECKS PASSED`；生成模式还必须显示 token ID comparison 已通过。若首轮在模型加载阶段 OOM，可改用 4 个经确认空闲的 Phy-ID 并将 TP 同步改为 4；不得用 `--no-generate` 替代生成正确性结论。
+
+### 2026-07-16：Qwen3-30B-A3B TP=2 的 KV cache 预算错误
+
+- 使用 Phy-ID `0,1`、TP=2 加载 Qwen3-30B-A3B 时，每个 worker 已成功加载约 `28.4767 GiB` 权重；失败发生在随后 vLLM 计算 KV cache block 预算的阶段，尚未执行 gate=0 snapshot 或 Layout dispatch。
+- 传入的 `--gpu-memory-utilization 0.10` 将每卡可供 vLLM 使用的总预算限制为约 10%，小于模型权重本身，日志因此显示 `Available KV cache memory: -23.55 GiB`，并抛出 `ValueError: No available memory for the cache blocks`。该参数并非“只给 KV cache 留 10%”；它是 vLLM 的整卡内存使用上限。此前建议 0.10 对该模型不正确，现予以修正。
+- 后续使用相同 TP=2 和空闲卡时，应从 `--gpu-memory-utilization 0.80` 重试；若仍不足，再在获得资源许可后扩大 TP。`WorkerProc was terminated`、EngineCore 初始化失败和 shared-memory 清理 warning 均为该预算异常后的连带信息，不是独立根因。
