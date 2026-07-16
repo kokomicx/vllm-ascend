@@ -449,3 +449,8 @@ vllm-ascend/
 
 - 用户可用的 `root@k8s-node-48` 即包含当前最佳小型标准 MLA 候选 `/mnt/weight/DeepSeek-V2-Lite-W8A8`。此前已读取其配置：`model_type=deepseek_v2`、`kv_lora_rank=512`、27 layers；一次加载仅 4 个 safetensors shard、约 15.30 GiB 权重，明显优于 node-51 V3.1 的 88 shard 多卡加载。
 - 因此 V2-Lite-W8A8 作为标准 MLA 正确性闭环的默认模型，无需因 node-51 不可用而改变验证范围。可用一个只读 `config.json` 扫描列出 `/mnt/weight` 与 `/mnt/weights` 中其他具有 DeepSeek model_type 或 `kv_lora_rank` 的候选；但不得因名称相似而替换默认模型，除非配置和权重规模均确认更适合。
+
+### 2026-07-16：DeepSeek-V2-Lite-W8A8 容量与加载时间基线
+
+- k8s-node-48 的实际 vLLM 启动日志显示该模型的已加载权重为 `15.2958 GB`，存储为 4 个 safetensors checkpoint shard；该数值是当前验证环境中实际加载到 NPU 的权重大小，比目录名或理论参数量更适合作为测试容量依据。
+- 同一日志显示 4 个 shard 完成约 27 秒、`Loading weights took 27.41 seconds`，随后 MLA KV cache 初始化与 engine profile 约 12 秒。因此在存储和 NPU 无竞争时，一次 gate snapshot 启动通常约 40 秒量级；一次 gate=0/1 metadata A/B 约数分钟内完成，生成阶段在此基础上增加短 prompt 的数秒推理，不应出现 V3.1 的数十分钟权重读取。
