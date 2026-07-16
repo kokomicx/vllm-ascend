@@ -252,3 +252,65 @@ vllm-ascend/
 - 目的：针对风险最高的三条真实 NPU 路径——Sparse MLA bf16（3 tensor）、Sparse MLA C8（按设备可能为 3/4 tensor）和 DeepSeek V4 Compressed MLA（单 raw buffer 的 `as_strided` overlay）——证明新 Layout dispatch 与旧 if-else 路径产出的 KV cache 元数据一致。该验证主要捕获 tensor 拆分、dtype、对齐、reshape、DeepSeek V4 层排序等错误。
 - 使用 `tests/e2e/verify_layout_refactor.sh <model>`：脚本会执行单测、在 gate=0 和 gate=1 下各加载一次相同模型、以 `--no-generate` 导出 JSON snapshot，再比较所有层的 tensor 数量、shape、dtype、连续性。必须固定模型 revision、设备、TP、`max-model-len`、`gpu-memory-utilization` 与 `block-size`，并保留 gate=0/1 JSON 作为 PR 证据。
 - 当前脚本刻意使用 `--no-generate`，仅验证初始化阶段；通过后还需要在具备 `_C_ascend.npu_scatter_pa_kv_cache_vllm` 的环境执行不带该标志的确定性生成 token 对比，作为端到端正确性证据。
+
+### 2026-07-16：k8s-node-48 模型库存与 Layout 覆盖评估
+
+- 可用模型：`/mnt/weight/DeepSeek-V2-Lite-W8A8`、`/mnt/weight/DeepSeek-V3.1-w4a8-perchannle`、`/mnt/weight/MiniMax-M2-Eagle3-{1,2,3}`、`/mnt/weights/GLM-5.1-w8a8`、`/mnt/weights/Qwen3-30B-A3B`、`/mnt/weights/Qwen3.5-{2B,35B-A3B}`。
+- 预计可覆盖：DeepSeek V2-Lite/V3.1（标准 MLA，`SplitKVLayout`）、Qwen3-30B-A3B（GQA，`SplitKVLayout`）、Qwen3.5（Hybrid 的 attention `SplitKVLayout` + `MambaLayout`）、MiniMax Eagle 草稿/辅助 cache（需读取 config 后确认 `SingleTensorLayout`）、GLM-5.1 SFA（预计 `SparseMLALayout`；须从 config/snapshot 确认并不假设 W8A8 权重量化等于 C8 KV cache）。
+- 当前库存未发现 DeepSeek V3.2 C8 或 DeepSeek V4 fp8 权重，因此 `SparseMLAC8Layout` 和 `CompressedMLALayout` 不能在 k8s-node-48 完成真机 E2E；需在 node-51 或其他拥有对应模型和硬件的环境补齐，PR 中不得将它们标为已验证。
+
+### 2026-07-16：GLM-5.1 Sparse MLA 验证受 NPU OOM 阻断
+
+- 在 k8s-node-48 以 TP=1 运行 GLM-5.1 的旧路径 snapshot 时，EngineCore 在模型加载阶段失败：`torch.OutOfMemoryError: NPU out of memory. Tried to allocate 3.00 GiB`。当时 NPU 0 总容量 61.27 GiB，PyTorch 本进程已分配/保留 18.40 GiB，设备仅余 440 MiB；调用栈位于 W8A8 `FusedMoE` 权重创建，早于 KV cache 初始化。
+- 结论：这不是 `VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH`、KV cache reshape 或 gate=0/1 差异引起的失败。`--gpu-memory-utilization` 只影响模型加载后的 KV cache 预算，不能解决模型权重加载 OOM。
+- 日志开头的 c10d/Gloo hostname 解析与 loopback warning 在 `world size 1` 下是非阻断提示；真正的 root cause 是上述 NPU OOM。下一步先检查 NPU 进程占用并选择空闲卡，若模型单卡仍无法装载，则使用可用卡数的 TP>1 后再运行 A/B snapshot。
+
+### 2026-07-16：node-51 可用于 Sparse/Compressed 真机验证
+
+- `npu-smi info` 显示物理设备 0、1、2 分别已有 56–62 GiB 的同事进程占用，不能使用；设备 3–15 没有用户进程，仅有约 2.8–3.1 GiB 基础 HBM 占用。使用前仍需按服务器资源约定确认选择的整组 NPU 卡。
+- node-51 模型库存包含 `DeepSeek-V3.2-Exp-bf16`（Sparse MLA bf16 首选候选）、多个带 `w8a8c8` 名称的 DeepSeek 权重（C8 候选，需运行时确认 KV cache C8 配置，而不能仅依目录名判断）、`DeepSeek-V4-Flash-Base` 与 `DeepSeek-V4-Pro-w4a8-0504`（Compressed MLA 候选）。
+- 建议策略：避开 0–2，先以一组连续空闲卡（例如确认可用后的 `4,5,6,7`）执行 TP=4 的模型加载预检；如模型权重容量仍不足，再按可获得的连续空闲卡数提高 TP。`--gpu-memory-utilization` 只用于给模型加载后的 KV cache 留空间，不能代替足够的 TP 容量。
+
+### 2026-07-16：node-51 选择空闲 NPU 卡的操作约定
+
+- `ASCEND_RT_VISIBLE_DEVICES` 使用 `npu-smi` 中的 Phy-ID，逗号分隔且不带空格；变量必须在启动验证脚本的同一 shell 中 export，EngineCore 子进程会继承该限制。
+- 当前避开已占用的 Phy-ID `0,1,2`；也不优先使用 `3`（其同一双芯 NPU 的另一芯 2 已满）。推荐先申请/确认 `4,5,6,7`：两组完整空闲双芯卡。TP=2 使用 `4,5`；TP=4 使用 `4,5,6,7`；如已确认 `4–11` 全部可用，TP=8 使用 `4,5,6,7,8,9,10,11`。
+- `--tensor-parallel-size` 必须等于可见 Phy-ID 的数量。运行前可用 `python -c "import torch; print(torch.npu.device_count())"` 确认进程仅看到预期数目的 NPU；脚本启动头部也会打印 `NPU device` 以供复核。
+
+### 2026-07-16：DeepSeek-V3.2-Exp-bf16 加载失败（checkpoint/config 不兼容）
+
+- node-51 以 TP=4 加载候选 bf16 模型时，4 个 worker 在 safetensors 加载第 5/163 个 shard 后一致报 `KeyError: 'layers.5.self_attn.q_a_layernorm.weight'`。
+- 精确含义：loader 正在遍历 checkpoint 中名为该 key 的 tensor，但当前 vLLM 按该模型目录 `config.json` 构造的 `params_dict` 不含同名参数；属于 checkpoint 权重结构/命名与 config 或当前 vLLM `deepseek_v2.py` 实现不兼容。不是权重缺失、NPU OOM、TP 卡选择、KV cache 初始化或 gate=0/1 引起。
+- `q_a_layernorm` 仅在模型使用 Q-LoRA 分支时存在；应先检查候选目录的 `config.json`（特别是 `q_lora_rank`、`model_type`、architectures）及 safetensors index，再改用与当前 vLLM commit 已验证兼容的 DeepSeek V3.2 模型目录。禁止为继续 KV cache 验证而在本 PR 中绕过或改写模型权重加载逻辑。
+
+### 2026-07-16：DeepSeek-V3.2-Exp-bf16 兼容性检查结论（修正）
+
+- `config.json`：`model_type=deepseek_v32`、`architectures=[DeepseekV32ForCausalLM]`、`q_lora_rank=1536`、`kv_lora_rank=512`。因此按配置构建的模型必须包含 Q-LoRA 的 `q_a_layernorm`。
+- `model.safetensors.index.json`：不包含 `layers.5.self_attn.q_a_layernorm.weight`（也需进一步检查所有层的同类 key）。这修正了上一条记录中“checkpoint 正在提供该普通权重”的推断：该 KeyError 可能来自 loader 的名称映射/派生名称，但索引已证明标准目标权重不在 checkpoint。
+- 当前最可能情况是该 `Exp-bf16` checkpoint 在量化/转换中省略或融合了 Q-LoRA layernorm，而当前 vLLM loader 仍按独立参数加载；不得通过跳过 missing weight 规避，否则推理正确性不可保证。该模型不适合作为本次 KV cache E2E 候选，除非获得与此 checkpoint 配套的 vLLM loader/镜像。
+
+### 2026-07-16：checkpoint key 前缀检查修正；标准 DeepSeek-V3.2 成为首选候选
+
+- `/mnt/weight/DeepSeek-V3.2` 的 `config.json` 为 `deepseek_v32`、`q_lora_rank=1536`、`num_hidden_layers=61`；safetensors index 中有 62 个 `model.layers.*.self_attn.q_a_layernorm.weight` key。额外 1 个通常对应 MTP/预测层。该 checkpoint 的 Q-LoRA 权重结构与配置预期一致，是当前 bf16 Sparse MLA 验证的首选候选。
+- 修正：此前检查 `DeepSeek-V3.2-Exp-bf16` 时查询的是无 `model.` 前缀的 `layers.5...` key，而标准 checkpoint key 使用 `model.layers.5...`。因此“Exp-bf16 缺失 q_a_layernorm 普通权重”的结论不能成立，已撤回；原始 `KeyError` 仍发生于模型加载/名称映射阶段、与 KV cache 无关，但其具体 loader 不兼容原因需要用带 `model.` 前缀的索引检查或源码映射继续确认。
+
+### 2026-07-16：TP=4 启动时 PyTorch/OpenMP 线程池崩溃
+
+- 标准 DeepSeek V3.2 的 gate=0 启动在模型/KV cache 初始化之前失败：EngineCore 主进程报 `c10::Error: pool INTERNAL ASSERT FAILED ... Invalid thread pool!`，栈位于 PyTorch `ParallelOpenMP.cpp:set_num_threads` 与 autograd engine thread 初始化。
+- `Qwen2VLImageProcessorFast` 是 Transformers 弃用提示，非根因；主进程 abort 后 TP worker 才无法连接 `TCPStore(127.0.0.1:51161)`，相关 TCP/HCCL 信息均为连带错误。
+- 当前 vLLM multiprocess executor 在外部未设置 `OMP_NUM_THREADS` 时会主动调用 `torch.set_num_threads(1)` 以避免 TP CPU 竞争；该路径与运行环境已有 OpenMP/PyTorch thread pool 的状态冲突是最可能原因。重试前在启动 shell 显式设置 `OMP_NUM_THREADS=1`（并同步设置 MKL/OpenBLAS/NUMEXPR 为 1），让 vLLM 不再重新设置线程数；若仍失败，再用 TP=1 小模型验证环境或更换与该 PyTorch/CANN 组合匹配的镜像。该问题与 KV cache Layout 和 gate 无关。
+
+### 2026-07-16：验证策略收敛为先完成 GQA/Hybrid 交付闭环
+
+- 因 Sparse/Compressed MLA 当前受模型 checkpoint 兼容性、NPU 占用和 PyTorch/OpenMP 环境问题阻断，决定先不让其阻塞 Layout 重构的首个可交付成果。
+- 第一阶段范围：已具备基础验证条件的 GQA（`SplitKVLayout`）与 Qwen3.5 Hybrid（attention `SplitKVLayout` + `MambaLayout`）。目标是跑通“代码改动 -> 单测 -> gate=0/1 KV metadata 等价 -> 固定输入的生成 token ID 等价 -> lint/CI 配置 -> PR 证据”的完整流程。
+- 正确性证据分两层：初始化 snapshot 比较 tensor 数、shape、dtype、连续性；端到端使用固定模型 revision、prompt、seed、`temperature=0` 比较 token ID 序列（文本仅作辅助展示）。token 验证需要具备 Ascend scatter op 的环境，不能用 `--no-generate` 替代。
+- Sparse MLA bf16/C8 与 Compressed MLA 仍保留为第二阶段模型矩阵；在获得兼容 checkpoint 和稳定环境后补齐，不应影响 GQA/Hybrid 的代码质量收敛与 PR 准备。
+
+### 2026-07-16：实现 gate=0/1 生成 token ID 严格对比
+
+- `tests/e2e/test_layout_correctness.py`：实际生成时将 `completion.token_ids` 写入 snapshot 的 `generated_token_ids`；`--no-generate` 明确写入 `null`；新增断言要求生成模式产生非空 token ID。
+- `tests/e2e/compare_kv_cache_shapes.py`：新增 token ID 比较。两份 snapshot 均有 token ID 时默认严格逐项比较；`--require-generated-token-ids` 会在任一侧缺失或 token 序列不同（报告首个不同 index）时失败，避免将 `--no-generate` 结果误作端到端正确性证据。
+- `tests/e2e/verify_layout_refactor.sh`：新增 `--generate`。默认行为保持初始化布局验证（传 `--no-generate`）；指定 `--generate` 时运行实际推理并自动传 `--require-generated-token-ids` 给比较器。
+- `tests/test_phase3_layout_dispatch.py`：新增比较器回归用例，覆盖相同 token 通过、token 不同失败和缺失 token 失败。Phase 3 pytest 预期从 20 项增加到 21 项。
+- 本地验证通过：三个 Python 文件 `py_compile`、Bash `-n`、比较器三种行为检查、`git diff --check`。本机仍缺少 torch，未运行 NPU/vLLM pytest；需在服务器运行更新后的 Phase 3 pytest 和 GQA/Hybrid `--generate` E2E。

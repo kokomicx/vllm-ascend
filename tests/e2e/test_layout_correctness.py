@@ -80,19 +80,23 @@ def generate_and_capture(
             trust_remote_code=True,
         )
 
+        generated_token_ids: list[int] | None = None
         if no_generate:
             generated_text = "(skipped — --no-generate)"
         else:
             prompts = ["Hello, how are you?"]
             sampling_params = SamplingParams(max_tokens=8, temperature=0.0, seed=42)
             outputs = llm.generate(prompts, sampling_params)
-            generated_text = outputs[0].outputs[0].text
+            completion = outputs[0].outputs[0]
+            generated_text = completion.text
+            generated_token_ids = list(completion.token_ids)
 
         # Read the snapshot dumped by the engine-core process
         with open(dump_path) as f:
             snapshot = json.load(f)
 
         snapshot["generated_text"] = generated_text
+        snapshot["generated_token_ids"] = generated_token_ids
         snapshot["model"] = model
         snapshot["max_model_len"] = max_model_len
 
@@ -185,6 +189,16 @@ def test_generated_text_non_empty(snapshot: dict[str, Any]):
     )
 
 
+@pytest.mark.skipif(
+    os.environ.get("SKIP_NPU_TESTS", "0") == "1",
+    reason="SKIP_NPU_TESTS=1",
+)
+def test_generated_token_ids_non_empty(snapshot: dict[str, Any]):
+    """Generation mode must record the exact output token sequence."""
+    token_ids = snapshot.get("generated_token_ids")
+    assert token_ids, "Generated token IDs are empty or missing"
+
+
 # ---------------------------------------------------------------------------
 # CLI entry-point (runs without pytest when executed directly)
 # ---------------------------------------------------------------------------
@@ -228,6 +242,7 @@ if __name__ == "__main__":
     print(f"  Gate enabled : {snapshot['gate_enabled']}")
     print(f"  Num layers   : {snapshot['num_layers']}")
     print(f"  Generated    : {snapshot['generated_text']!r}")
+    print(f"  Token IDs    : {snapshot['generated_token_ids']!r}")
     for name, entry in snapshot["layers"].items():
         if entry["container"] == "tuple":
             shapes = [e["shape"] for e in entry["entries"]]

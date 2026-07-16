@@ -412,6 +412,36 @@ def test_v2_deepseek_v4_hamming_sparse_uses_single_attn_module():
     assert hash_init.call_args.kwargs["num_attn_module"] == 1
 
 
+def test_generated_token_id_comparison():
+    """Generated token IDs must be present and exactly equal in generate mode."""
+    from tests.e2e.compare_kv_cache_shapes import _compare_generated_token_ids
+
+    errors: list[str] = []
+    _compare_generated_token_ids(
+        {"generated_token_ids": [1, 2, 3]},
+        {"generated_token_ids": [1, 2, 3]},
+        require_generated_token_ids=True,
+        errors=errors,
+    )
+    assert not errors
+
+    _compare_generated_token_ids(
+        {"generated_token_ids": [1, 2, 3]},
+        {"generated_token_ids": [1, 4, 3]},
+        require_generated_token_ids=True,
+        errors=errors,
+    )
+    assert "differ at index 1" in errors[-1]
+
+    _compare_generated_token_ids(
+        {},
+        {},
+        require_generated_token_ids=True,
+        errors=errors,
+    )
+    assert "missing from both snapshots" in errors[-1]
+
+
 if __name__ == "__main__":
     test_v2_methods_exist()
     test_alloc_aligned()
@@ -433,5 +463,6 @@ if __name__ == "__main__":
     test_needs_alignment()
     test_v2_imports_cleanly()
     test_v2_deepseek_v4_hamming_sparse_uses_single_attn_module()
+    test_generated_token_id_comparison()
     print("\n" + "=" * 50)
     print("ALL PHASE 3 TESTS PASSED")

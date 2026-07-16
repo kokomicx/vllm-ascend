@@ -47,7 +47,56 @@ def _flatten_entries(name: str, entry: dict) -> list[tuple[str, list[int], str, 
     return flat
 
 
-def compare_snapshots(old_path: str, new_path: str, strict: bool = False) -> int:
+def _compare_generated_token_ids(
+    old: dict[str, Any],
+    new: dict[str, Any],
+    require_generated_token_ids: bool,
+    errors: list[str],
+) -> None:
+    """Append an error when generated token IDs are required or differ."""
+    old_ids = old.get("generated_token_ids")
+    new_ids = new.get("generated_token_ids")
+
+    if old_ids is None and new_ids is None:
+        if require_generated_token_ids:
+            errors.append(
+                "Generated token IDs are missing from both snapshots; "
+                "rerun without --no-generate."
+            )
+        return
+
+    if old_ids is None or new_ids is None:
+        errors.append(
+            "Generated token IDs are present in only one snapshot "
+            f"(old={old_ids is not None}, new={new_ids is not None})."
+        )
+        return
+
+    if not isinstance(old_ids, list) or not isinstance(new_ids, list):
+        errors.append("Generated token IDs must be JSON lists.")
+        return
+
+    if old_ids != new_ids:
+        mismatch_index = next(
+            (
+                index
+                for index, (old_id, new_id) in enumerate(zip(old_ids, new_ids))
+                if old_id != new_id
+            ),
+            min(len(old_ids), len(new_ids)),
+        )
+        errors.append(
+            "Generated token IDs differ at index "
+            f"{mismatch_index} (old={old_ids}, new={new_ids})."
+        )
+
+
+def compare_snapshots(
+    old_path: str,
+    new_path: str,
+    strict: bool = False,
+    require_generated_token_ids: bool = False,
+) -> int:
     """Compare two snapshot JSON files.  Returns 0 on success, 1 on mismatch."""
     with open(old_path) as f:
         old = json.load(f)
@@ -103,6 +152,13 @@ def compare_snapshots(old_path: str, new_path: str, strict: bool = False) -> int
                     f"{o_name}: contiguous old={o_contig} new={n_contig}"
                 )
 
+    _compare_generated_token_ids(
+        old,
+        new,
+        require_generated_token_ids=require_generated_token_ids,
+        errors=errors,
+    )
+
     # --- Report ---
     if errors:
         print(f"\n[FAIL] MISMATCH found ({len(errors)} issue(s)):")
@@ -117,6 +173,11 @@ def compare_snapshots(old_path: str, new_path: str, strict: bool = False) -> int
         print(f"  New model: {new.get('model', '?')}")
         print(f"  Old generated: {old.get('generated_text', '')!r}")
         print(f"  New generated: {new.get('generated_text', '')!r}")
+        token_ids = old.get("generated_token_ids")
+        if token_ids is None:
+            print("  Generated token IDs: skipped")
+        else:
+            print(f"  Generated token IDs: identical ({len(token_ids)} tokens)")
         return 0
 
 
@@ -135,10 +196,20 @@ def main():
         action="store_true",
         help="Also fail on sub-tensor naming differences",
     )
+    parser.add_argument(
+        "--require-generated-token-ids",
+        action="store_true",
+        help="Fail unless both snapshots contain identical generated token IDs",
+    )
     args = parser.parse_args()
 
     try:
-        code = compare_snapshots(args.old_json, args.new_json, strict=args.strict)
+        code = compare_snapshots(
+            args.old_json,
+            args.new_json,
+            strict=args.strict,
+            require_generated_token_ids=args.require_generated_token_ids,
+        )
     except FileNotFoundError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         code = 2

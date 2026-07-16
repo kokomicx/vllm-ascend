@@ -11,7 +11,7 @@
 #   4. A/B comparison of the two snapshots
 #
 # Usage:
-#   bash tests/e2e/verify_layout_refactor.sh /path/to/model [--max-model-len 2048] [--skip-unit-tests]
+#   bash tests/e2e/verify_layout_refactor.sh /path/to/model [--max-model-len 2048] [--skip-unit-tests] [--generate]
 #
 # Prerequisites:
 #   - NPU server with torch-npu installed
@@ -40,6 +40,7 @@ fi
 # Parse args
 # ---------------------------------------------------------------------------
 SKIP_UNIT_TESTS=0
+GENERATE=0
 MAX_MODEL_LEN=2048
 TENSOR_PARALLEL_SIZE=1
 GPU_MEMORY_UTILIZATION=0.30
@@ -50,6 +51,8 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --skip-unit-tests)
             SKIP_UNIT_TESTS=1 ;;
+        --generate)
+            GENERATE=1 ;;
         --max-model-len)
             MAX_MODEL_LEN="$2"; shift ;;
         --tensor-parallel-size)
@@ -97,8 +100,16 @@ echo ""
 _info "Model          : $MODEL"
 _info "Max model len  : $MAX_MODEL_LEN"
 _info "NPU device     : $ASCEND_RT_VISIBLE_DEVICES"
+_info "Generate       : $GENERATE"
 _info "Snapshots      : $OLD_JSON  /  $NEW_JSON"
 echo ""
+
+SNAPSHOT_ARGS=(--no-generate)
+COMPARE_ARGS=()
+if [[ "$GENERATE" -eq 1 ]]; then
+    SNAPSHOT_ARGS=()
+    COMPARE_ARGS=(--require-generated-token-ids)
+fi
 
 # ---------------------------------------------------------------------------
 # Step 1: Unit tests
@@ -130,7 +141,7 @@ python "$SCRIPT_DIR/test_layout_correctness.py" \
     --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --output "$OLD_JSON" \
-    --no-generate \
+    "${SNAPSHOT_ARGS[@]}" \
     || _err "Old-path snapshot failed"
 
 _info "   Old-path snapshot saved to $OLD_JSON"
@@ -147,7 +158,7 @@ python "$SCRIPT_DIR/test_layout_correctness.py" \
     --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --output "$NEW_JSON" \
-    --no-generate \
+    "${SNAPSHOT_ARGS[@]}" \
     || _err "New-path snapshot failed"
 
 _info "   New-path snapshot saved to $NEW_JSON"
@@ -157,7 +168,8 @@ _info "   New-path snapshot saved to $NEW_JSON"
 # ---------------------------------------------------------------------------
 _info "[4/4] Comparing KV cache shapes ..."
 
-python "$SCRIPT_DIR/compare_kv_cache_shapes.py" "$OLD_JSON" "$NEW_JSON" \
+python "$SCRIPT_DIR/compare_kv_cache_shapes.py" \
+    "$OLD_JSON" "$NEW_JSON" "${COMPARE_ARGS[@]}" \
     || _err "A/B comparison FAILED — see discrepancies above"
 
 # ---------------------------------------------------------------------------
