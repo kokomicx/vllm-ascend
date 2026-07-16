@@ -444,3 +444,8 @@ vllm-ascend/
 
 - 最新 k8s-node-48 的 `npu-smi info` 显示 NPU 0--7、Phy-ID 0--15 均无用户进程；可安全选择 Phy-ID `0` 作为 DeepSeek-V2-Lite-W8A8 的 TP=1 验证卡（仍须在启动前即时复查资源和遵守服务器预约约定）。
 - 为避免 node-51 V3.1 的 88-shard 长加载，恢复 `/mnt/weight/DeepSeek-V2-Lite-W8A8`（4 shard）的标准 MLA 逆序 A/B：使用 `ASCEND_RT_VISIBLE_DEVICES=0`、TP=1、`gpu-memory-utilization=0.80`，并预先创建 `/tmp/kv_mla_node48_layout` 与 `/tmp/kv_mla_node48_tokens`。两阶段均按 gate=1 后 gate=0 执行；生成阶段比较器必须带 `--require-generated-token-ids`。
+
+### 2026-07-16：k8s-node-48 小型 MLA 模型确认
+
+- 用户可用的 `root@k8s-node-48` 即包含当前最佳小型标准 MLA 候选 `/mnt/weight/DeepSeek-V2-Lite-W8A8`。此前已读取其配置：`model_type=deepseek_v2`、`kv_lora_rank=512`、27 layers；一次加载仅 4 个 safetensors shard、约 15.30 GiB 权重，明显优于 node-51 V3.1 的 88 shard 多卡加载。
+- 因此 V2-Lite-W8A8 作为标准 MLA 正确性闭环的默认模型，无需因 node-51 不可用而改变验证范围。可用一个只读 `config.json` 扫描列出 `/mnt/weight` 与 `/mnt/weights` 中其他具有 DeepSeek model_type 或 `kv_lora_rank` 的候选；但不得因名称相似而替换默认模型，除非配置和权重规模均确认更适合。
