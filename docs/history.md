@@ -454,3 +454,8 @@ vllm-ascend/
 
 - k8s-node-48 的实际 vLLM 启动日志显示该模型的已加载权重为 `15.2958 GB`，存储为 4 个 safetensors checkpoint shard；该数值是当前验证环境中实际加载到 NPU 的权重大小，比目录名或理论参数量更适合作为测试容量依据。
 - 同一日志显示 4 个 shard 完成约 27 秒、`Loading weights took 27.41 seconds`，随后 MLA KV cache 初始化与 engine profile 约 12 秒。因此在存储和 NPU 无竞争时，一次 gate snapshot 启动通常约 40 秒量级；一次 gate=0/1 metadata A/B 约数分钟内完成，生成阶段在此基础上增加短 prompt 的数秒推理，不应出现 V3.1 的数十分钟权重读取。
+
+### 2026-07-16：V2-Lite 标准 MLA 正确性基线最终命令
+
+- 基线环境固定为 k8s-node-48：`MODEL=/mnt/weight/DeepSeek-V2-Lite-W8A8`、`ASCEND_RT_VISIBLE_DEVICES=0`、TP=1、`max-model-len=2048`、`gpu-memory-utilization=0.80`，并设置 OMP/MKL/OpenBLAS/NUMEXPR 线程数为 1。启动前复查 Phy-ID 0 无用户进程。
+- 先运行 Phase 3 单测；随后以 gate=1 先、gate=0 后的顺序，在预先创建并验证可写的独立目录中运行两次 `--no-generate` snapshot 并严格比较 metadata。metadata 通过后，在另一独立目录中用相同逆序运行两次真实生成，并以 `--require-generated-token-ids` 要求 token 序列一致。JSON 和日志目录均保留为 PR 证据。
