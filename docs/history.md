@@ -343,3 +343,9 @@ vllm-ascend/
 - 使用 Phy-ID `0,1`、TP=2 加载 Qwen3-30B-A3B 时，每个 worker 已成功加载约 `28.4767 GiB` 权重；失败发生在随后 vLLM 计算 KV cache block 预算的阶段，尚未执行 gate=0 snapshot 或 Layout dispatch。
 - 传入的 `--gpu-memory-utilization 0.10` 将每卡可供 vLLM 使用的总预算限制为约 10%，小于模型权重本身，日志因此显示 `Available KV cache memory: -23.55 GiB`，并抛出 `ValueError: No available memory for the cache blocks`。该参数并非“只给 KV cache 留 10%”；它是 vLLM 的整卡内存使用上限。此前建议 0.10 对该模型不正确，现予以修正。
 - 后续使用相同 TP=2 和空闲卡时，应从 `--gpu-memory-utilization 0.80` 重试；若仍不足，再在获得资源许可后扩大 TP。`WorkerProc was terminated`、EngineCore 初始化失败和 shared-memory 清理 warning 均为该预算异常后的连带信息，不是独立根因。
+
+### 2026-07-16：Qwen3-30B-A3B gate=0/1 snapshot 的单 block 差异
+
+- 使用 TP=2、`gpu_memory_utilization=0.80` 后，gate=0/1 已可完成加载并进入 JSON snapshot 比较；96 项失败恰好对应 48 个 attention layer 的 K/V 两个 tensor。
+- 所有差异均为 shape 第 0 维：旧路径 `[3301, 128, 2, 128]`，新路径 `[3302, 128, 2, 128]`；其余维度、容器、dtype 和连续性均未报告差异。这说明 K/V 拆分语义未发现不一致，差异集中在 vLLM 根据各次独立启动时 profiling 的可用内存向下取整得到的全局 KV block 数量，且仅跨越一个 block 边界。
+- 该现象目前不能直接认定为 Layout 逻辑错误，也不能为让测试通过而放宽 comparator 的 shape 比较；否则会掩盖真实容量回归。应先以 gate=1 先启动、gate=0 后启动的逆序复测，观察 block 数量是否随启动顺序改变；随后为 E2E harness 增加并使用相同的 `num_gpu_blocks_override`，在固定 block 容量下比较实际物理布局和生成 token ID。此项完成前，GQA metadata parity 不得标为通过。
