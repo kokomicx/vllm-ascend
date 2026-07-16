@@ -429,3 +429,8 @@ vllm-ascend/
 - gate=0 运行日志已证明 4 个 safetensors shard 成功加载（15.30 GiB 权重）、ASCEND_MLA backend 以 block size 128 初始化、27 层 KV cache metadata dump 成功，且可用 KV memory 为 32.97 GiB；这说明模型加载和 MLA cache 初始化未报错。
 - 随后进程仅显示 `Killed`，比较器又报告缺少 `/tmp/kv_mla_reverse_tokens/gate0_second.json`。用户确认 token 阶段输出目录未事先创建；目录缺失会解释最终 JSON/日志不存在和 comparator 的 `Errno 2`，但不能单独解释无 traceback 的 `Killed`，应将其视为待复现的进程异常（可能为宿主/cgroup OOM 或外部终止）。
 - 因为没有形成 gate=0、gate=1 两份完整生成 snapshot，也没有执行 `--require-generated-token-ids` 的成功比较，本轮不能作为 MLA 精度/token parity 通过证据。重试前必须用 `mkdir -p /tmp/kv_mla_reverse_tokens_retry` 创建新目录并验证可写；若在目录正确时再次出现 `Killed`，立即收集 `dmesg -T` 中 OOM/killed-process 信息和完整终端日志后再调整资源参数。
+
+### 2026-07-16：node-51 最新空闲 NPU 选择
+
+- 最新 `npu-smi info` 显示 NPU 0、1、2、4 有用户进程，不能使用；完整空闲的 NPU 组仍是 NPU 3、5、6、7，其实际 Phy-ID 分别为 `6,7`、`10,11`、`12,13`、`14,15`，仅有约 2.8--3.1 GiB 基础 HBM 占用。
+- 单卡/TP=1 首选 `ASCEND_RT_VISIBLE_DEVICES=6`；双卡/TP=2 首选同一完整空闲组的 `6,7`；只有确实需要 V3.1 级大模型的 TP=8 时才使用 `6,7,10,11,12,13,14,15`。变量填写的是 Phy-ID，不是表格顶部的 NPU 组号；TP 必须等于列表中的 Phy-ID 数量。
