@@ -513,3 +513,8 @@ vllm-ascend/
 - 对此前 `npu-smi` 快照中的 PID 2841539--2841566 执行 `ps` 时未返回任何进程，`/proc/2841539` 也不存在；这证明这些 worker 在查询前已退出，且不是权限拒绝。之前的 NPU 输出是历史快照，不能再用已失效 PID 追查当前所有者。
 - 该作业可能正常结束、启动异常退出或被停止；仅凭 PID 消失不能判定原因或操作者。`pstree: command not found` 仅表示当前镜像没有安装该辅助工具，与进程状态无关。
 - 后续应先立即刷新 `npu-smi info`，再对其显示的当前 PID 使用 `ps -ww -o user,uid,pid,ppid,lstart,etime,args` 取证；也可直接枚举所有当前 vLLM/EngineCore worker 进程。没有预先启用审计时，已退出进程的所属用户只能通过调度器、容器或系统日志间接追溯。
+
+### 2026-07-16：当前共享 NPU worker 用户查询
+
+- 用户再次提供的最新 `npu-smi info` 中，PID `2841539--2841566` 仍显示为当前占满全部 16 张 Phy-ID 的 vLLM worker；应立刻在同一台主机执行 `ps -ww -o user:20,uid:8,pid,ppid,lstart,etime,args -p <逗号分隔PID列表>`。其中 `USER` 即启动该 Linux 进程的账号，`UID`、完整命令行、启动时间和父 PID 可用于核对归属。
+- 对任一仍存活 PID，可读取 `/proc/<pid>/cwd`、`/proc/<pid>/cmdline`、`/proc/<pid>/cgroup`，并用不依赖 `pstree` 的 PPID 循环追溯父链；这可定位工作目录、启动入口及容器/调度 cgroup。若显示账号为 `root`，它只能说明服务账号，具体自然人仍需结合容器、调度器或集群审计记录确认。不得自行终止他人作业。
