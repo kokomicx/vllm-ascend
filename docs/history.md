@@ -355,3 +355,9 @@ vllm-ascend/
 - 按逆序执行（先 gate=1，后 gate=0）后，comparator 输出 `[PASS] All 48 layers match (shape + dtype + contiguous)`。两份 snapshot 的 `kv_cache_0[0]` 均为 `[3301, 128, 2, 128]`，并且所有 48 层的 K/V tensor 均一致；这为 `SplitKVLayout` 的实际 NPU metadata 等价提供了首个端到端证据。
 - 两次 profiling 的 `Available KV cache memory` 分别为 `19.35 GiB`（gate=1 先启动）和 `19.34 GiB`（gate=0 后启动）。该约 0.01 GiB 的独立进程可用内存波动足以跨越一个全模型 KV block 的向下取整边界，解释了此前顺序运行中观察到的 3301/3302 单 block 差异；逆序测试未发现 gate 相关的稳定布局差异。
 - 当前输出中的 `Generated token IDs: skipped` 符合本轮 `--no-generate` 的预期，不是失败。下一步必须在单独临时目录使用 `--generate` 运行同一 GQA gate=0/1 流程，并要求 generated token ID 逐项一致；通过后才能宣称 GQA 的端到端正确性闭环完成。
+
+### 2026-07-16：Qwen3-30B-A3B GQA 端到端 token parity 已通过
+
+- 在 k8s-node-48 上以 Phy-ID `0,1`、TP=2、`max-model-len=2048`、`gpu_memory_utilization=0.80` 执行 `verify_layout_refactor.sh --skip-unit-tests --generate`。gate=0 与 gate=1 均成功执行真实生成，并保留 snapshot 至 `/tmp/kv_gqa_tokens/`。
+- 最终 comparator 输出：48 层 KV cache 的 shape、dtype、连续性均一致；生成文本均为 `" I'm trying to solve this problem:"`；`Generated token IDs: identical (8 tokens)`。脚本以 `[PASS] ALL CHECKS PASSED` 结束。
+- 因此，`SplitKVLayout` 在 Qwen3-30B-A3B（纯 GQA）的首个真实 NPU 闭环已完成：单测已通过、KV metadata gate=0/1 等价已验证、固定输入的贪心生成 token ID 已逐项一致。日志中的 `torch._C._host_emptyCache()` 版本 warning 为 PyTorch < 2.5 的非阻塞提示；大量 `HMA_RESHAPE_AND_CACHE` warning 属于当前调试日志，提交 PR 前应清理或降为 debug，避免污染正常推理日志。
