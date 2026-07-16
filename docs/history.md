@@ -412,3 +412,9 @@ vllm-ascend/
 
 - TP=8 标准 MLA 验证启动后，vLLM 正在加载 DeepSeek-V3.1-W4A8 权重的 88 个 safetensors checkpoint shard；进度从 0 到 25/88 时单 shard 约 25--30 秒，预计仍需约 30 分钟量级。这是大模型权重从 `/mnt/weight` 读取并分发到 TP worker 的正常启动阶段，尚未进入 KV cache 初始化或 Layout gate 对比。
 - 日志中“not a recognized network FS (NFS/Lustre)”以及建议 `--safetensors-load-strategy=prefetch` 的文字是 safetensors loader 未能识别挂载文件系统类型的性能提示，不是错误。当前运行已进行到 25/88，应避免中断重启；待本次完成后再评估是否需要为测试 harness 暴露 prefetch 策略。加载耗时主要取决于权重总量、88 个 shard 的元数据/IO 开销和共享存储带宽，不表示 NPU 计算卡异常。
+
+### 2026-07-16：标准 MLA 候选模型的效率调整
+
+- DeepSeek-V3.1-W4A8 的 88 shard 加载使单轮 metadata A/B 验证耗时约一小时以上，不适合优先建立快速正确性闭环。若运行仍处于权重加载阶段且未生成 snapshot，可在当前交互终端以一次 `Ctrl+C` 正常停止，避免使用 `kill -9`；停止不会损坏 checkpoint。
+- 当前 node-51 顶层模型清单未明确列出小型标准 MLA：Qwen 系列主要用于 GQA/Hybrid，DeepSeek V3.1/R1/V3.2 级候选体量较大（V3.2 还属于后续 Sparse MLA 范畴）。首选仍是 k8s-node-48 的 `DeepSeek-V2-Lite-W8A8`，或先在 node-51 的 `/mnt` 下定位是否存在同名/等价 V2-Lite 目录后再启动。
+- 仅在找到小型 DeepSeek V2/Lite MLA 候选并通过 `config.json` 的 `model_type`、`kv_lora_rank` 预检后，才替换模型路径执行既定 metadata 与 token ID 流程；不得用小型 Qwen GQA 模型替代标准 MLA 覆盖。
