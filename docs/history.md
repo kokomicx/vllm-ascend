@@ -483,3 +483,9 @@ vllm-ascend/
 - 模型目录实测为 `713G`。在 k8s-node-48 上，V2-Lite 的 15.30 GiB 权重需约 27.4 秒加载；仅按数据量线性换算，713G 模型单次加载下限约 21 分钟。实际还会受更多 shard、TP worker 并发、共享存储带宽和权重分发影响，按每次 engine 启动约 30--60 分钟估算更稳妥，不能承诺精确分钟数。
 - 713G 除以 16 张 64 GiB NPU 约为 44.6 GiB/卡（未计 activation、allocator 和 KV cache），而 TP=8 约为 89 GiB/卡，通常无法装入。因此在 k8s-node-48 全部 16 张 Phy-ID 空闲时，GLM Sparse MLA 的首轮容量方案应为 TP=16（`0,1,...,15`）；`gpu_memory_utilization=0.80` 给每卡约 49 GiB 总预算，剩余空间有限但对 2048 token 的单请求验证可能足够，若加载后 cache 预算不足再基于实际日志调整。
 - 为避免大模型重复加载四次，Sparse MLA 的正式最小闭环可直接执行两次真实生成：gate=1 一次、gate=0 一次，并对两份生成 snapshot 同时做 metadata 严格比较和 `--require-generated-token-ids` token 比较。生成 snapshot 已包含 metadata，因此不必在该模型上额外先跑 `--no-generate` 两次；该优化不降低正确性判据。
+
+### 2026-07-16：GLM-5.1 Sparse MLA TP=16 正式验证命令
+
+- 最新 k8s-node-48 `npu-smi` 显示 Phy-ID 0--15、NPU 0--7 全部无用户进程。GLM-5.1 的正式验证使用 `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15` 与 TP=16；这是基于 713G 权重容量的首选方案。
+- 两条路径均固定 `max-model-len=2048`、TP=16、`gpu_memory_utilization=0.90`。相较先前估算的 0.80，0.90 使每张 64 GiB 卡的 vLLM 总预算约为 55 GiB，为约 44.6 GiB/卡的平均权重、activation 与 Sparse KV cache 留出更稳妥空间；最终仍以 worker 实际 cache budget 日志为准。
+- 为节省加载时间，只执行两次真实生成 snapshot：gate=1 先、gate=0 后；在预先创建且可写的 `/tmp/kv_glm_sparse_tokens` 下保存 JSON/log，随后比较器以 `--require-generated-token-ids` 同时严格检查 78 层 Sparse cache metadata 和 token 序列。期待每层出现三项 Sparse MLA cache（K、V、indexer）；任何权重 OOM、HCCL 或 cache budget 失败均应停止后收集完整日志，不进行第二条路径。
