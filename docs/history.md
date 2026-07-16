@@ -390,3 +390,9 @@ vllm-ascend/
 
 - 模型 `config.json` 显示 `model_type=deepseek_v2`、`architectures=[DeepseekV2ForCausalLM]`、`num_hidden_layers=27`、`kv_lora_rank=512`、`q_lora_rank=None`。该组合仍是标准 MLA：`kv_lora_rank` 是 KV latent compression 的关键配置，512 维 KV latent cache 需要配合 RoPE 分量参与注意力计算。
 - `q_lora_rank` 控制的是 Query 投影是否采用可选的 Q-LoRA 低秩分解，与是否使用 MLA 无关。值为 `None` 仅表示 Query 使用普通投影，不能据此否定 MLA。该模型继续作为标准 MLA gate=0/1 metadata 与 token ID 验证的合适候选。
+
+### 2026-07-16：标准 MLA gate=0/1 的单 block 差异待复测
+
+- DeepSeek-V2-Lite-W8A8 的 `--generate` A/B 比较出现 54 条 shape 差异，恰为 27 层 × K/V 两个 tensor。所有差异仅在第 0 维：gate=0 为 8880、gate=1 为 8881；每层的 MLA latent KV shape `[N, 128, 1, 512]` 与 RoPE shape `[N, 128, 1, 64]` 的其余维度一致。
+- 这表示差异是全局 `num_blocks` 的一个 block，而非某个 layer 的 K/V/rope 分割、dtype 或 tensor-container 语义错误，与此前 GQA 的 profiling 边界现象相似。由于 comparator 没有报告 `Generated token IDs differ`，本轮生成 token 很可能已一致，但 metadata 比较失败时不能将整个闭环标记为通过。
+- 下一步：保持模型、TP=1、设备和 `gpu-memory-utilization=0.80` 不变，使用 gate=1 先启动、gate=0 后启动的 `--no-generate` 逆序 snapshot 复测，并记录两边 `Available KV cache memory`。若 block 数随启动顺序/可用内存微小波动改变，则按 GQA 结论处理；若始终固定为 gate 相关的 8880/8881，则进一步调查 profiling 内存差异，并为 harness 引入固定 `num_gpu_blocks_override` 后再做严格 metadata 与 token 验证。不得放宽 shape comparator。
