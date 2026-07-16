@@ -361,3 +361,9 @@ vllm-ascend/
 - 在 k8s-node-48 上以 Phy-ID `0,1`、TP=2、`max-model-len=2048`、`gpu_memory_utilization=0.80` 执行 `verify_layout_refactor.sh --skip-unit-tests --generate`。gate=0 与 gate=1 均成功执行真实生成，并保留 snapshot 至 `/tmp/kv_gqa_tokens/`。
 - 最终 comparator 输出：48 层 KV cache 的 shape、dtype、连续性均一致；生成文本均为 `" I'm trying to solve this problem:"`；`Generated token IDs: identical (8 tokens)`。脚本以 `[PASS] ALL CHECKS PASSED` 结束。
 - 因此，`SplitKVLayout` 在 Qwen3-30B-A3B（纯 GQA）的首个真实 NPU 闭环已完成：单测已通过、KV metadata gate=0/1 等价已验证、固定输入的贪心生成 token ID 已逐项一致。日志中的 `torch._C._host_emptyCache()` 版本 warning 为 PyTorch < 2.5 的非阻塞提示；大量 `HMA_RESHAPE_AND_CACHE` warning 属于当前调试日志，提交 PR 前应清理或降为 debug，避免污染正常推理日志。
+
+### 2026-07-16：Hybrid 验证执行计划
+
+- 下一目标为 `/mnt/weights/Qwen3.5-2B` 的 Hybrid 闭环，用于同时覆盖 attention 的 `SplitKVLayout` 和线性 attention/Mamba 的 `MambaLayout`。在 k8s-node-48 上先复查资源后选一张空闲 Phy-ID（首选 `2`），TP=1。
+- 第一阶段以 `max-model-len=2048`、`gpu-memory-utilization=0.80` 运行不带 `--generate` 的验证脚本（不跳过单测），保存 `/tmp/kv_hybrid_layout/` 的 gate=0/1 snapshot 并要求 metadata comparator 通过。第二阶段使用独立的 `/tmp/kv_hybrid_tokens/`，带 `--skip-unit-tests --generate` 运行，要求生成 token ID 严格一致。
+- 成功后保存两套 JSON 和完整终端末尾输出；若 metadata 仅出现全层一致的单 block 差异，按 GQA 的方法进行逆序启动复测，而不得修改 comparator 容忍该差异。若 `--generate` 缺失 Ascend scatter 算子，则记录为环境阻塞，不能以 `--no-generate` 代替 token 正确性结论。
