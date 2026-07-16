@@ -407,3 +407,8 @@ vllm-ascend/
 - node-51 的 `/mnt/weight/` 未列出 DeepSeek-V2-Lite，标准 MLA 候选改为 `/mnt/weight/DeepSeek-V3.1-w4a8-perchannle`。DeepSeek V3.1 使用标准 MLA（Sparse MLA 应留给 V3.2 等模型）；启动前仍须读取 config 确认 `model_type`、`kv_lora_rank` 等配置。
 - 当前 `npu-smi info` 中完整空闲的 NPU 组是 NPU 3、5、6、7，其实际 Phy-ID 分别为 `6,7`、`10,11`、`12,13`、`14,15`；这些卡仅有约 2.8--3.1 GiB 基础 HBM 占用且无用户进程。NPU 0、1、2、4 存在用户进程，禁止使用。考虑 V3.1 W4A8 的模型规模，首轮使用 `ASCEND_RT_VISIBLE_DEVICES=6,7,10,11,12,13,14,15` 与 TP=8，并在启动前再次复查资源。
 - 在 node-51 的 `/home/c50058674/kvnocontinue/test_kvcache/vllm-ascend` 上，先确保工作区干净并 `git pull --ff-only` 到已推送分支；之后先做默认 metadata A/B，成功后用独立目录做 `--generate` token ID A/B。显式设置 OMP/MKL/OpenBLAS/NUMEXPR 为 1，以避免此前多卡启动时的 PyTorch/OpenMP thread-pool 异常。
+
+### 2026-07-16：node-51 DeepSeek-V3.1 safetensors 加载耗时说明
+
+- TP=8 标准 MLA 验证启动后，vLLM 正在加载 DeepSeek-V3.1-W4A8 权重的 88 个 safetensors checkpoint shard；进度从 0 到 25/88 时单 shard 约 25--30 秒，预计仍需约 30 分钟量级。这是大模型权重从 `/mnt/weight` 读取并分发到 TP worker 的正常启动阶段，尚未进入 KV cache 初始化或 Layout gate 对比。
+- 日志中“not a recognized network FS (NFS/Lustre)”以及建议 `--safetensors-load-strategy=prefetch` 的文字是 safetensors loader 未能识别挂载文件系统类型的性能提示，不是错误。当前运行已进行到 25/88，应避免中断重启；待本次完成后再评估是否需要为测试 harness 暴露 prefetch 策略。加载耗时主要取决于权重总量、88 个 shard 的元数据/IO 开销和共享存储带宽，不表示 NPU 计算卡异常。
