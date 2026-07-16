@@ -495,3 +495,9 @@ vllm-ascend/
 - 大模型权重加载、TP/HCCL 初始化、KV cache 分配和 warmup 属于冷启动/发布路径，而非稳态在线请求路径。企业部署通常用多副本路由、rolling/blue-green/canary 发布和 readiness gate 保留旧副本直到新副本完整 warmup；生产容量设置最小热副本或 warm pool，自动扩缩容只应处理可容忍冷启动的流量。共享/网络存储上可评估 safetensors `prefetch` 或 `eager`（须评估 CPU RAM）以及与 TP 匹配的预分片 checkpoint，降低启动 IO；避免将 713G 模型的完整冷启动暴露给终端用户。
 - 在线服务的核心 SLO 应分解为 TTFT（含排队和 prefill 的首 token 延迟）、TPOT/ITL（逐 token 延迟和抖动）、E2EL、成功率/超时率和 P50/P95/P99，而非只报单请求 tokens/s。容量侧同时记录请求/输出/总 token 吞吐、并发、queue wait、KV cache usage/preemption/eviction、NPU 利用率与显存余量；以满足 TTFT/TPOT/E2EL SLO 的 goodput 而非峰值吞吐作为扩容和优化决策。
 - 对本 KV layout 重构的评审性能证据，应在相同模型、权重、TP、设备、max-model-len、batch/到达率和采样参数下比较 gate=0/1：正确性先由 token parity 确认，再报告 TTFT、TPOT/ITL、E2EL 的 P50/P99、output/total token throughput、错误率和 KV cache block 容量。无统计显著的改善时，PR 仅主张无回归与可维护性，不能宣称吞吐优化。
+
+### 2026-07-16：KV Layout 重构的 PR 价值定位
+
+- 本工作应定位为 correctness-preserving、layout-driven 的可维护性重构，而不是未经基准证明的性能优化。主价值是将 `model_runner_v1.py` 中模型类型、量化、Sparse/Compressed/Mamba 等物理 KV cache 分配/reshape 特例从大型条件分支中拆出，收敛为显式、可独立测试的 `KVCacheLayout` 策略对象。
+- 评审叙事应强调：模型新增/变更只需选择或新增 layout；K/V/indexer/scale/raw-buffer 等存储语义集中且可审查；gate=0/1 并存使迁移可回滚；单测与真实 NPU token parity 覆盖降低后续回归风险；旧路径可在验证充分后有计划删除。性能测试的承诺只是不回归（TTFT、TPOT/ITL、吞吐、KV capacity），而非声称速度提升。
+- 若某些环境中 gate=1 因 allocator/profile 细节出现一个额外 KV block，应仅作为待复核的容量观测，不可当作 PR 性能收益；除非在固定配置、多次测量下稳定复现并具有明确因果解释。
