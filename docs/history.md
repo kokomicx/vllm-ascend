@@ -528,3 +528,8 @@ vllm-ascend/
 
 - 17:14:42 的新 `npu-smi info` 显示 PID 2841539--2841566 仍在设备侧持续运行：全部 16 张 Phy-ID 的 AICore 均为 100%，HBM 约 60.99--61.31 GiB，进程表中每个 worker 约 58.12--58.17 GiB；因此此前容器内 `ps` 的空结果不能再解释为该作业已结束。
 - 同一 PID 同时在 `npu-smi` 存在、在当前 shell 的 `/proc` 和 `ps` 不存在，最符合 Kubernetes/容器 PID namespace 隔离：`npu-smi` 从 Ascend 驱动的节点全局视图返回 host/其他容器 PID，而当前容器无权枚举其 `/proc`。应先检查 `/proc/1/ns/pid`、`/proc/$$/ns/pid` 和 `/proc/1/cgroup` 确认当前 namespace；要取得 `USER`/完整命令，必须由节点宿主机或有 `hostPID` 权限的管理员在 host PID namespace 上执行同一条 `ps` 命令，再通过容器/调度器记录映射到人。当前容器内不能可靠推断用户名，且不应自行 kill 作业。
+
+### 2026-07-16：node-51 容器隔离证据与跨节点边界
+
+- 在 `root@node-51` 中，当前 shell 与 PID 1 的 namespace 都是 `pid:[4026564880]`，而 PID 1 的所有 cgroup 控制器均指向 `docker-a16fff0817e5e3c6df91e6238cebae05b6708b17978e7339b3def9e4336f5bc1.scope`；这直接证明该登录环境是 Docker 容器。`uid=0(root)` 仅表示容器内 root，不能取得宿主机或其他容器的进程可见性。
+- 先前占满 16 卡的 `npu-smi` 快照来自 `k8s-node-48`，本次 namespace 证据来自 `node-51`；两者是不同物理节点，不能从 node-51 的 `/proc` 映射 node-48 PID。若要定位 node-48 上的 worker，管理员需在 **node-48 host PID namespace** 对 PID 读取 `/proc/<pid>/cgroup`，再用 Docker/Kubernetes/调度器记录将 cgroup/容器 ID 映射到作业和用户。
