@@ -434,3 +434,8 @@ vllm-ascend/
 
 - 最新 `npu-smi info` 显示 NPU 0、1、2、4 有用户进程，不能使用；完整空闲的 NPU 组仍是 NPU 3、5、6、7，其实际 Phy-ID 分别为 `6,7`、`10,11`、`12,13`、`14,15`，仅有约 2.8--3.1 GiB 基础 HBM 占用。
 - 单卡/TP=1 首选 `ASCEND_RT_VISIBLE_DEVICES=6`；双卡/TP=2 首选同一完整空闲组的 `6,7`；只有确实需要 V3.1 级大模型的 TP=8 时才使用 `6,7,10,11,12,13,14,15`。变量填写的是 Phy-ID，不是表格顶部的 NPU 组号；TP 必须等于列表中的 Phy-ID 数量。
+
+### 2026-07-16：基于 node-51 空闲卡的 V3.1 MLA 测试命令
+
+- 若在 node-51 上继续标准 MLA 测试，模型使用 `/mnt/weight/DeepSeek-V3.1-w4a8-perchannle`，卡选择固定为空闲 Phy-ID `6,7,10,11,12,13,14,15`，对应 TP=8；所有 gate=0/1 命令必须使用同一可见卡列表、TP、`max-model-len=2048` 和 `gpu-memory-utilization=0.80`。
+- 验证采用两阶段逆序流程：先以 gate=1、后 gate=0 的 `--no-generate` snapshot 做 metadata 比较；该阶段通过后以同样顺序进行真实生成，并使用 `--require-generated-token-ids` 比较。因 V3.1 的权重为 88 shard，每个阶段都可能耗时数十分钟；目录创建和 `set -euo pipefail` 是必需项，避免因缺少 JSON 而误判。
