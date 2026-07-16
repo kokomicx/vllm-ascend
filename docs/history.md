@@ -331,3 +331,9 @@ vllm-ascend/
 - `ASCEND_RT_VISIBLE_DEVICES` 中应填写 `npu-smi info` 显示的实际 `Phy-ID`，而不是占位文本 `<free_npu>`；多个卡以逗号连接且不带空格。该变量须在启动验证脚本的同一 shell 中设置。
 - 本次 `k8s-node-48` 的 `npu-smi info` 中 Phy-ID `0` 到 `15` 均未列出用户进程，仅有约 2.8--3.2 GiB 的基础 HBM 占用，因此在资源约定允许的前提下均可作为候选。首次 GQA TP=1 可使用 `export ASCEND_RT_VISIBLE_DEVICES=0` 并配套 `--tensor-parallel-size 1`；TP=2 例如使用 `0,1` 并配套 `--tensor-parallel-size 2`。
 - 启动前应立即再次运行 `npu-smi info`，确认目标 Phy-ID 仍无进程；不得占用他人已申请或正在使用的卡。
+
+### 2026-07-16：k8s-node-48 GQA/Hybrid 闭环执行命令
+
+- 纯 GQA 首轮使用 `/mnt/weights/Qwen3-30B-A3B`。考虑到 30B 权重在 64 GiB 单卡上的余量较小，首选空闲 Phy-ID `0,1`、TP=2；先在默认 `--no-generate` 模式执行含单测的 KV metadata A/B，再以独立临时目录执行 `--generate --skip-unit-tests` 的 token ID 严格 A/B。
+- Hybrid 随后使用 `/mnt/weights/Qwen3.5-2B`，使用空闲 Phy-ID `2`、TP=1，以相同的 metadata 与生成 token ID 两阶段流程验证。两次运行均固定 `max-model-len=2048`、`gpu-memory-utilization=0.10`，并保留 gate=0/1 JSON snapshot 作为 PR 证据。
+- 成功判据必须包含脚本末尾的 `[PASS] ALL CHECKS PASSED`；生成模式还必须显示 token ID comparison 已通过。若首轮在模型加载阶段 OOM，可改用 4 个经确认空闲的 Phy-ID 并将 TP 同步改为 4；不得用 `--no-generate` 替代生成正确性结论。
