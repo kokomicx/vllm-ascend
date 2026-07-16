@@ -396,3 +396,8 @@ vllm-ascend/
 - DeepSeek-V2-Lite-W8A8 的 `--generate` A/B 比较出现 54 条 shape 差异，恰为 27 层 × K/V 两个 tensor。所有差异仅在第 0 维：gate=0 为 8880、gate=1 为 8881；每层的 MLA latent KV shape `[N, 128, 1, 512]` 与 RoPE shape `[N, 128, 1, 64]` 的其余维度一致。
 - 这表示差异是全局 `num_blocks` 的一个 block，而非某个 layer 的 K/V/rope 分割、dtype 或 tensor-container 语义错误，与此前 GQA 的 profiling 边界现象相似。由于 comparator 没有报告 `Generated token IDs differ`，本轮生成 token 很可能已一致，但 metadata 比较失败时不能将整个闭环标记为通过。
 - 下一步：保持模型、TP=1、设备和 `gpu-memory-utilization=0.80` 不变，使用 gate=1 先启动、gate=0 后启动的 `--no-generate` 逆序 snapshot 复测，并记录两边 `Available KV cache memory`。若 block 数随启动顺序/可用内存微小波动改变，则按 GQA 结论处理；若始终固定为 gate 相关的 8880/8881，则进一步调查 profiling 内存差异，并为 harness 引入固定 `num_gpu_blocks_override` 后再做严格 metadata 与 token 验证。不得放宽 shape comparator。
+
+### 2026-07-16：MLA 逆序复测命令的执行说明
+
+- 逆序复测代码块中的多个 `python` 命令必须按顺序在同一 shell 执行，而不是任选一个：第一个在 `VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH=1` 下生成 gate=1 snapshot；第二个在 gate=0 下生成 snapshot；第三个调用 comparator 比较两份 JSON。最后的 `grep` 仅提取两次启动的可用 KV cache 内存日志。
+- 用户可将完整代码块一次性粘贴至服务器 Bash 终端。命令中的行尾反斜杠表示同一条 Python 命令换行续写；在任一 Python 命令报错时，应停止后续步骤并提供完整错误输出，而不是继续手动执行比较器。
