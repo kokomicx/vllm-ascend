@@ -471,3 +471,9 @@ vllm-ascend/
 - k8s-node-48 上进入 Sparse MLA 的首选候选为 `/mnt/weights/GLM-5.1-w8a8`。它可能覆盖 Sparse/DSA attention cache 的 K、V 与 indexer 等额外物理 buffer；但模型目录中的 W8A8 只是权重格式，不能据此推断 C8 KV cache，也不能单凭名称标记 Sparse MLA 已验证。
 - `/mnt/weight/DeepSeek-V2-Lite-W8A8` 已作为标准 MLA 通过，不覆盖 Sparse MLA；当前 DeepSeek V3.1 候选也属于标准 MLA 验证路径。DeepSeek V3.2 是 node-51 上的 Sparse MLA bf16 候选，但当前受 checkpoint/多卡环境问题影响，不作为首轮选择。
 - GLM-5.1 之前在 k8s-node-48 的 TP=1 在 FusedMoE 权重加载阶段 OOM，发生在 KV cache 初始化前、与 Layout 无关。下一步先读取其 config 并进行小规模/多卡容量预检；只有启动 snapshot 确认实际存在 sparse indexer cache 后，才以 metadata A/B 和 token ID A/B 标记 SparseMLALayout 覆盖。C8 scale-cache 和 Compressed MLA 仍需各自的模型与环境，不能由此次 GLM 结果替代。
+
+### 2026-07-16：GLM-5.1-w8a8 Sparse MLA 配置已确认
+
+- `/mnt/weights/GLM-5.1-w8a8/config.json` 显示 `model_type=glm_moe_dsa`、`architectures=[GlmMoeDsaForCausalLM]`、78 layers、`q_lora_rank=2048`、`kv_lora_rank=512`、`head_dim=64`、`v_head_dim=256`。
+- `index_head_dim=128`、`index_n_heads=32`、`index_topk=2048`、`indexer_rope_interleave=True` 是 DSA/Sparse indexer attention 的直接配置证据。该模型既有 512 维 MLA KV latent，又有额外 indexer cache，因此是 `SparseMLALayout`（bf16 sparse MLA）的有效真实模型候选，而非仅名称推断。
+- 模型名中的 W8A8 仅说明权重量化，不证明 KV cache 是 C8；本模型可用于验证三 tensor 的 Sparse MLA 分配/reshape 与 token parity，但不能替代 `SparseMLAC8Layout` 的 scale-cache 覆盖。后续启动 snapshot 应确认每层出现 K、V、indexer 的三项 cache 形态；此前 TP=1 的 FusedMoE 加载 OOM 仍要求以足够 TP 容量运行。
