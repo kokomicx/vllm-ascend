@@ -379,3 +379,9 @@ vllm-ascend/
 - GQA 与 Hybrid 的真实 NPU 正确性闭环完成后，下一阶段进入标准 MLA、Sparse MLA bf16、Sparse MLA C8 和 Compressed MLA 的分层验证。顺序必须是先正确性、后性能：不得在尚未证明 gate=0/1 行为等价时宣称优化收益。
 - 每个可运行模型均执行两层证据：第一层为固定模型 revision、NPU、TP、`max-model-len` 和 cache 预算下的 gate=0/1 KV metadata 严格比较；第二层为相同固定 prompt、seed、`temperature=0` 的真实生成 token ID 逐项比较。`--no-generate` 只能作为第一层证据，不能替代第二层。
 - MLA 的高风险点是 raw buffer 的切分与 K/V/rope view；Sparse MLA 还必须确认配置实际触发了 sparse 分支、indexer cache（及 C8 时的 scale cache）已存在且 metadata 对齐。优先选择当前兼容且容量足够的标准 MLA 模型完成流程，再处理 Sparse MLA；此前 GLM-5.1 的 TP=1 权重加载 OOM 与 KV Layout 无关，应在获准的多卡 TP 环境重试。C8 与 Compressed MLA 仅在相应模型、算子和环境可用时标记为已验证。
+
+### 2026-07-16：标准 MLA（DeepSeek-V2-Lite-W8A8）验证流程
+
+- 标准 MLA 首选 k8s-node-48 的 `/mnt/weight/DeepSeek-V2-Lite-W8A8`，先使用一张经 `npu-smi info` 确认空闲的 Phy-ID（建议 `3`）和 TP=1。W8A8 是权重量化标签，不代表 Sparse MLA C8；该模型用于隔离验证标准 MLA 的 K/V/rope cache 切分和 reshape。
+- 在服务器执行前先检查 `git status --short`、当前分支与 HEAD；只有工作区干净时才 `git pull --ff-only`，确保测试代码与已推送分支一致。不得以包含未提交模型 runner/layout 改动的工作区作为 PR 正确性证据。
+- 以 `max-model-len=2048`、`gpu-memory-utilization=0.80` 先运行含单测的默认 metadata A/B，再在独立目录运行 `--skip-unit-tests --generate` 的 token ID A/B；成功必须同时包含 metadata comparator 通过、token IDs identical 与 `[PASS] ALL CHECKS PASSED`。
