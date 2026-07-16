@@ -538,3 +538,9 @@ vllm-ascend/
 
 - 用户提供的 `/home/weight` 候选包括 `GLM-5-w4a8`、Kimi-K2.6 系列、Qwen3-8B、Qwen3-30B-A3B-W8A8、Qwen3.5-27B-w8a8-org`、DeepSeek V3.1 及若干 Eagle/MTP 目录，`/home/weights` 仅有 MiniMax-M2.7。目录名不足以判断 attention/KV cache 物理布局，且量化名称不能证明 Sparse MLA/C8 cache。
 - `GLM-5-w4a8` 因 GLM DSA 命名与此前已验证的 GLM-5.1 DSA 配置最值得优先读取 `config.json`，但仍可能是很大的 MoE；Qwen3-8B/30B 和 Qwen3.5-27B 不应仅凭名称当作 Sparse MLA。下一步以一次性脚本读取各候选的 `model_type`、architecture、`q_lora_rank`、`kv_lora_rank`、`index_*`/`sparse_*`/`dsa` 字段并同时报告 `du -sh`，再按实际配置和容量选最小的真实 Sparse MLA 验证模型。
+
+### 2026-07-16：本地最小可用 Sparse MLA 模型已确定
+
+- `/home/weight/GLM-5-w4a8` 为当前唯一已确认的真实 Sparse MLA/DSA 候选：`model_type=glm_moe_dsa`、`architectures=GlmMoeDsaForCausalLM`、78 层、`q_lora_rank=2048`、`kv_lora_rank=512`，且有 `index_head_dim=128`、`index_n_heads=32`、`index_topk=2048`、`indexer_rope_interleave=True`。目录实测 392G，比 `/mnt/weights/GLM-5.1-w8a8` 的 713G 小约 45%，应替换后者作为首轮 `SparseMLALayout` 真实 NPU/token parity 基线。
+- `Qwen3-8B`（16G）为普通 Qwen3、`Qwen3-30B-A3B-W8A8`（30G）为 Qwen3 MoE；后者的 `decoder_sparse_step` 不能替代 DSA/indexer cache，二者均无 MLA `kv_lora_rank`。Kimi Eagle、Qwen Eagle3 均为 1 层/草稿模型；DeepSeek MTP/random 与 `deepseek-v3.1-w4a8-puring` 仅为 4--5 层 MLA 辅助/随机模型，不是 Sparse MLA 主模型；Kimi-W4A8 和 MiniMax 目录大小为 0，当前权重不完整或仅有元数据。因此这些小目录不能作为 SparseMLALayout 主路径的上线证据。
+- 为优先保证首次超大 MoE 启动成功，若 16 张卡都由本作业独占，先采用 TP=16、`max-model-len=2048`、`gpu-memory-utilization=0.80`；392G 权重平均约 24.5G/卡，可为 MoE activation 和 Sparse KV cache 留出明确余量。验证目标是 gate=1 与 gate=0 的真实生成 snapshot metadata/token ID 严格一致，不主张性能提升。
