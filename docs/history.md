@@ -314,3 +314,8 @@ vllm-ascend/
 - `tests/e2e/verify_layout_refactor.sh`：新增 `--generate`。默认行为保持初始化布局验证（传 `--no-generate`）；指定 `--generate` 时运行实际推理并自动传 `--require-generated-token-ids` 给比较器。
 - `tests/test_phase3_layout_dispatch.py`：新增比较器回归用例，覆盖相同 token 通过、token 不同失败和缺失 token 失败。Phase 3 pytest 预期从 20 项增加到 21 项。
 - 本地验证通过：三个 Python 文件 `py_compile`、Bash `-n`、比较器三种行为检查、`git diff --check`。本机仍缺少 torch，未运行 NPU/vLLM pytest；需在服务器运行更新后的 Phase 3 pytest 和 GQA/Hybrid `--generate` E2E。
+
+### 2026-07-16：token ID 对比测试已推送
+
+- 已提交并推送 `19b8f52 test(kv_cache): compare generated token IDs across layout paths` 至 `myfork/feature/layout-refactor-phase3`。推送时 PowerShell 无法解析既有 SSH 代理的 Unix `exec`，改用 Git Bash 后推送成功。
+- 后续工作约定：每次完成并验证本任务相关代码后，仅暂存任务涉及的文件（排除无关临时文件），使用 `git commit -s` 创建语义化提交，并推送至该远程分支。
