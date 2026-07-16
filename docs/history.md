@@ -501,3 +501,9 @@ vllm-ascend/
 - 本工作应定位为 correctness-preserving、layout-driven 的可维护性重构，而不是未经基准证明的性能优化。主价值是将 `model_runner_v1.py` 中模型类型、量化、Sparse/Compressed/Mamba 等物理 KV cache 分配/reshape 特例从大型条件分支中拆出，收敛为显式、可独立测试的 `KVCacheLayout` 策略对象。
 - 评审叙事应强调：模型新增/变更只需选择或新增 layout；K/V/indexer/scale/raw-buffer 等存储语义集中且可审查；gate=0/1 并存使迁移可回滚；单测与真实 NPU token parity 覆盖降低后续回归风险；旧路径可在验证充分后有计划删除。性能测试的承诺只是不回归（TTFT、TPOT/ITL、吞吐、KV capacity），而非声称速度提升。
 - 若某些环境中 gate=1 因 allocator/profile 细节出现一个额外 KV block，应仅作为待复核的容量观测，不可当作 PR 性能收益；除非在固定配置、多次测量下稳定复现并具有明确因果解释。
+
+### 2026-07-16：共享 NPU 服务器进程归属排查
+
+- k8s-node-48 最新 `npu-smi info` 显示 16 张 Phy-ID 0--15 均被 `VLLMWorker_DP` 占用，PID 为 2841539--2841566，单卡约 38--45 GiB HBM；PID 范围连续且覆盖所有 NPU，表明这是一个多卡 vLLM data-parallel 作业，而非多个独立小作业。
+- 排查当前作业归属应只读地将 PID 映射到 Linux `USER`/`UID`、`PPID`、完整命令行、启动时间、cwd 及父进程树；如作业运行在容器/Kubernetes 环境，还应读取 `/proc/<pid>/cgroup` 映射到容器或调度器 job。此操作能确认当前作业的启动账号/服务账号和来源。
+- 当前 `npu-smi` 与 `ps` 元数据不能追溯证明谁曾 kill 另一进程；只有预先启用的 Linux auditd/audit rule、Kubernetes/调度器事件、sudo/journal 记录或作业平台审计才可能保留操作者证据。处理方式应先保存只读证据并向资源管理员/作业所有者核实，禁止自行 kill 对方进程。
