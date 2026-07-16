@@ -373,3 +373,9 @@ vllm-ascend/
 - 在 k8s-node-48 上完成 `/mnt/weights/Qwen3.5-2B` 的 gate=0/1 `--generate` 验证。comparator 输出 `[PASS] All 24 layers match (shape + dtype + contiguous)` 及 `Generated token IDs: identical (8 tokens)`，脚本最终输出 `[PASS] ALL CHECKS PASSED`。
 - snapshot 显示 Hybrid cache 形态已被实际覆盖：部分层为包含 `[5858, 3, 6144]` 与 `[5858, 16, 128, 128]` 的双 state tensor list（线性 attention/Mamba），另一些层为 `[2, 29290, 128, 2, 256]` 的 attention tensor；gate=0 与 gate=1 对所有 24 层保持一致。
 - 两侧生成文本均为 `\n\n!!!!!!!`，对应的 8 个 token ID 严格相同。该文本本身不用于评价模型任务质量；在固定 prompt、seed 和 `temperature=0` 下，token ID 等价是本次 Layout 重构的正确性判据。GQA 与 Hybrid 的首轮真实 NPU 正确性闭环现均已完成。
+
+### 2026-07-16：MLA 与 Sparse MLA 后续验证原则
+
+- GQA 与 Hybrid 的真实 NPU 正确性闭环完成后，下一阶段进入标准 MLA、Sparse MLA bf16、Sparse MLA C8 和 Compressed MLA 的分层验证。顺序必须是先正确性、后性能：不得在尚未证明 gate=0/1 行为等价时宣称优化收益。
+- 每个可运行模型均执行两层证据：第一层为固定模型 revision、NPU、TP、`max-model-len` 和 cache 预算下的 gate=0/1 KV metadata 严格比较；第二层为相同固定 prompt、seed、`temperature=0` 的真实生成 token ID 逐项比较。`--no-generate` 只能作为第一层证据，不能替代第二层。
+- MLA 的高风险点是 raw buffer 的切分与 K/V/rope view；Sparse MLA 还必须确认配置实际触发了 sparse 分支、indexer cache（及 C8 时的 scale cache）已存在且 metadata 对齐。优先选择当前兼容且容量足够的标准 MLA 模型完成流程，再处理 Sparse MLA；此前 GLM-5.1 的 TP=1 权重加载 OOM 与 KV Layout 无关，应在获准的多卡 TP 环境重试。C8 与 Compressed MLA 仅在相应模型、算子和环境可用时标记为已验证。
