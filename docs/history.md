@@ -533,3 +533,8 @@ vllm-ascend/
 
 - 在 `root@node-51` 中，当前 shell 与 PID 1 的 namespace 都是 `pid:[4026564880]`，而 PID 1 的所有 cgroup 控制器均指向 `docker-a16fff0817e5e3c6df91e6238cebae05b6708b17978e7339b3def9e4336f5bc1.scope`；这直接证明该登录环境是 Docker 容器。`uid=0(root)` 仅表示容器内 root，不能取得宿主机或其他容器的进程可见性。
 - 先前占满 16 卡的 `npu-smi` 快照来自 `k8s-node-48`，本次 namespace 证据来自 `node-51`；两者是不同物理节点，不能从 node-51 的 `/proc` 映射 node-48 PID。若要定位 node-48 上的 worker，管理员需在 **node-48 host PID namespace** 对 PID 读取 `/proc/<pid>/cgroup`，再用 Docker/Kubernetes/调度器记录将 cgroup/容器 ID 映射到作业和用户。
+
+### 2026-07-16：k8s-node-48 本地 Sparse MLA 小模型候选盘点
+
+- 用户提供的 `/home/weight` 候选包括 `GLM-5-w4a8`、Kimi-K2.6 系列、Qwen3-8B、Qwen3-30B-A3B-W8A8、Qwen3.5-27B-w8a8-org`、DeepSeek V3.1 及若干 Eagle/MTP 目录，`/home/weights` 仅有 MiniMax-M2.7。目录名不足以判断 attention/KV cache 物理布局，且量化名称不能证明 Sparse MLA/C8 cache。
+- `GLM-5-w4a8` 因 GLM DSA 命名与此前已验证的 GLM-5.1 DSA 配置最值得优先读取 `config.json`，但仍可能是很大的 MoE；Qwen3-8B/30B 和 Qwen3.5-27B 不应仅凭名称当作 Sparse MLA。下一步以一次性脚本读取各候选的 `model_type`、architecture、`q_lora_rank`、`kv_lora_rank`、`index_*`/`sparse_*`/`dsa` 字段并同时报告 `du -sh`，再按实际配置和容量选最小的真实 Sparse MLA 验证模型。
