@@ -168,6 +168,10 @@
     - vllm_ascend/core
   tests:
     - tests/ut/core
+    - tests/test_kv_cache_layout.py
+    - tests/test_phase3_layout_dispatch.py
+    - tests/test_cpu_model_integration.py
+    - tests/validate_reshape_equivalence.py
 
 - name: device
   optional: true
@@ -292,6 +296,7 @@
     - vllm_ascend/patch
   tests:
     - tests/ut/patch
+    - tests/test_phase2_spec_dispatch.py
     - tests/e2e/pull_request/full/four_cards/test_kimi_k2.py
     - tests/e2e/pull_request/full/four_cards/test_qwen3_5.py
     - tests/e2e/pull_request/full/four_cards/test_qwen3_next.py
@@ -336,6 +341,7 @@
     - vllm_ascend/worker
   tests:
     - tests/ut/worker
+    - tests/test_phase3_layout_dispatch.py
     - tests/e2e/pull_request/light/one_card/aclgraph/test_aclgraph_accuracy.py
     - tests/e2e/pull_request/light/one_card/aclgraph/test_aclgraph_batch_invariant.py
     - tests/e2e/pull_request/light/one_card/aclgraph/test_aclgraph_mem.py

@@ -130,6 +130,7 @@ from vllm_ascend.core.kv_cache_layout import (
     KVCacheLayout,
     MambaLayout,
     SingleTensorLayout,
+    adjust_kv_layout,
 )
 from vllm_ascend.envs import VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -704,13 +705,12 @@ class NPUModelRunner(GPUModelRunner):
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
 
-        # [DEBUG HMA] Verify block_table GPU content across groups
         if num_reqs > 0 and hasattr(self.input_batch.block_table, 'block_tables'):
             for gid, bt in enumerate(self.input_batch.block_table.block_tables):
                 bt_gpu = bt.get_device_tensor()
                 # Sample first request's block table row
                 row0 = bt_gpu[0, :min(10, bt_gpu.shape[1])]
-                logger.warning(
+                logger.debug(
                     "BLOCK_TABLE_GPU group=%d block_size=%d logical_size=%d "
                     "blocks_per_phys=%d req0_first_10=%s",
                     gid, bt.block_size, bt.logical_block_size,
@@ -2085,8 +2085,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
-                # [DEBUG HMA] Log hidden_states and logits to verify model output sanity
-                logger.warning(
+                logger.debug(
                     "HIDDEN_STATES num_tokens=%d shape=%s mean=%.6f std=%.6f "
                     "has_nan=%s has_inf=%s",
                     sample_hidden_states.shape[0],
@@ -2205,16 +2204,15 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
-        # [DEBUG HMA] Log sampled token IDs to verify model output correctness
         sampled_ids = sampler_output.sampled_token_ids
         if torch.is_tensor(sampled_ids):
-            logger.warning(
+            logger.debug(
                 "SAMPLED_TOKENS shape=%s first_10=%s",
                 tuple(sampled_ids.shape),
                 sampled_ids.flatten()[:10].tolist(),
             )
         else:
-            logger.warning(
+            logger.debug(
                 "SAMPLED_TOKENS type=%s len=%s first_10=%s",
                 type(sampled_ids).__name__,
                 len(sampled_ids) if isinstance(sampled_ids, list) else 'N/A',
@@ -4152,6 +4150,9 @@ class NPUModelRunner(GPUModelRunner):
 
         return kv_cache_raw_tensors
 
+    # NOTE: Deprecated. Delegates to the standalone adjust_kv_layout in
+    # kv_cache_layout.py. Remove this method and update callers when the
+    # VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH gate is removed.
     def _adjust_kv_layout(
         self,
         raw_tensor: torch.Tensor,
@@ -4160,29 +4161,13 @@ class NPUModelRunner(GPUModelRunner):
         page_size_bytes: int,
         overlap_full_kv_cache: bool = False,
     ):
-        reshaped_kv_tensors = []
-        base_storage_offset_bytes = raw_tensor.storage_offset()
-        storage_offset_bytes = base_storage_offset_bytes
-        for idx, (shape, dtype) in enumerate(zip(kv_cache_shape_list, kv_cache_dtype_list)):
-            if overlap_full_kv_cache and idx == 2:
-                storage_offset_bytes = base_storage_offset_bytes
-            dtype_size = get_dtype_size(dtype)
-            num_element_per_page = (
-                page_size_bytes // dtype_size
-            )
-
-            stride = torch.empty(shape).stride()
-            target_stride = (num_element_per_page, *stride[1:])
-            assert storage_offset_bytes % dtype_size == 0
-            tensor = torch.as_strided(
-                raw_tensor.view(dtype),
-                size=shape,
-                stride=target_stride,
-                storage_offset=storage_offset_bytes // dtype_size,
-            )
-            reshaped_kv_tensors.append(tensor)
-            storage_offset_bytes += stride[0] * dtype_size
-        return reshaped_kv_tensors
+        return adjust_kv_layout(
+            raw_tensor,
+            kv_cache_shape_list,
+            kv_cache_dtype_list,
+            page_size_bytes,
+            overlap_full_kv_cache=overlap_full_kv_cache,
+        )
 
 
     def _reshape_kv_cache_tensors_for_mla(
@@ -4455,7 +4440,7 @@ class NPUModelRunner(GPUModelRunner):
                         v_shape = base_shape[:-1] + (head_size_v,)
                         k_cache = raw_k_tensor.view(dtype).view(k_shape)
                         v_cache = raw_v_tensor.view(dtype).view(v_shape)
-                        logger.warning(
+                        logger.debug(
                             "KV_RESHAPE_ATTN layer=%s spec_block_size=%d kernel_block_size=%d "
                             "num_blocks_per_kv=%d num_phys_blocks=%d kernel_num_blocks=%d "
                             "k_shape=%s v_shape=%s dtype=%s page_size_bytes=%d "
@@ -4469,8 +4454,7 @@ class NPUModelRunner(GPUModelRunner):
                         kv_caches[layer_name] = (k_cache, v_cache)
                     else:
                         kv_cache = raw_tensor.view(dtype).view(kv_cache_shape)
-                        # [DEBUG HMA] Log KV cache reshape to verify shape correctness
-                        logger.warning(
+                        logger.debug(
                             "KV_RESHAPE_ATTN layer=%s spec_block_size=%d kernel_block_size=%d "
                             "num_blocks_per_kv=%d num_phys_blocks=%d kernel_num_blocks=%d "
                             "shape=%s dtype=%s page_size_bytes=%d raw_bytes=%d",
@@ -4493,8 +4477,7 @@ class NPUModelRunner(GPUModelRunner):
                         kv_cache_spec.dtypes,
                         kv_cache_spec.page_size_bytes
                     )
-                    # [DEBUG HMA] Log Mamba KV cache reshape
-                    logger.warning(
+                    logger.debug(
                         "KV_RESHAPE_MAMBA layer=%s spec_block_size=%d num_blocks=%d "
                         "shapes=%s dtypes=%s page_size_bytes=%d raw_bytes=%d",
                         layer_name, kv_cache_spec.block_size, num_blocks,
@@ -4533,8 +4516,7 @@ class NPUModelRunner(GPUModelRunner):
             if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
             block_size = kv_cache_group.kv_cache_spec.block_size
-            # [DEBUG HMA] Trace block_size source in Hybrid models
-            logger.warning(
+            logger.debug(
                 "BLOCK_SIZE_SOURCE group=%d spec_block_size=%d "
                 "cache_config_block_size=%d spec_type=%s layer_count=%d",
                 i, block_size, self.cache_config.block_size,

@@ -234,3 +234,21 @@ vllm-ascend/
 - 已在 `tests/test_phase3_layout_dispatch.py` 增加回归测试：以最小 mock 走 DeepSeek V4 + hamming-sparse 的 V2 初始化分支，并断言 hash-cache 初始化收到 `num_attn_module=1`。
 - 本地验证：`python -m py_compile vllm_ascend/worker/model_runner_v1.py tests/test_phase3_layout_dispatch.py` 和 `git diff --check` 均通过。`python -m pytest tests/test_phase3_layout_dispatch.py -q` 在收集阶段因本机 Python 缺少 `torch` 失败，尚未运行任何测试；需在安装 vLLM/torch 的服务器环境执行该命令。
 - 待提交文件：`vllm_ascend/worker/model_runner_v1.py`、`tests/test_phase3_layout_dispatch.py`，以及本历史文件。
+
+### 2026-07-16：P0 回归测试（服务器）通过
+
+- 在 NPU 服务器 `k8s-node-48` 的 `/home/c50058674/kvcache/vllm-ascend` 执行 `python -m pytest tests/test_phase3_layout_dispatch.py -q`。
+- 结果：`20 passed, 17 warnings in 14.64s`。新增的 DeepSeek V4 + hamming-sparse 回归用例已包含在该文件的 20 项测试中，因此 P0 修复的目标回归测试通过。
+- 17 条 warning 均为 PyTorch、OpenTelemetry 或 SWIG 的 `DeprecationWarning`，没有 test failure、error 或 assertion failure；不构成本次改动的阻塞项。
+
+### 2026-07-16：PR 合入与评审工作计划
+
+- PR 定位调整为“Layout-driven KV cache 管理重构”：核心承诺是将 NPU 特有的多 tensor/物理连续性决策封装到 6 个 `KVCacheLayout`，证明 gate=0/1 行为等价且无性能回退；未经基准数据验证前，不宣称吞吐或时延提升。
+- 已确认仓库 CI 使用 `.github/workflows/scripts/test_config.yaml` 将源码映射到 UT/E2E；新增 `vllm_ascend/core/kv_cache_layout.py`、相关测试与 `model_runner_v1.py` 修改必须纳入该配置，否则 PR coverage 校验会失败。
+- 执行顺序：收敛 P0/P1 代码质量问题 -> 覆盖六种 Layout 的真机新旧路径验证 -> 增加确定性生成 token 对比及 TP/压力场景 -> 采集性能/内存无回退证据 -> CI、格式、提交整理与 PR -> 处理 review；旧路径删除和默认 gate=1 应在验证充分、评审认可后作为后续变更。
+
+### 2026-07-16：Sparse MLA 三布局 gate=0/1 验证说明
+
+- 目的：针对风险最高的三条真实 NPU 路径——Sparse MLA bf16（3 tensor）、Sparse MLA C8（按设备可能为 3/4 tensor）和 DeepSeek V4 Compressed MLA（单 raw buffer 的 `as_strided` overlay）——证明新 Layout dispatch 与旧 if-else 路径产出的 KV cache 元数据一致。该验证主要捕获 tensor 拆分、dtype、对齐、reshape、DeepSeek V4 层排序等错误。
+- 使用 `tests/e2e/verify_layout_refactor.sh <model>`：脚本会执行单测、在 gate=0 和 gate=1 下各加载一次相同模型、以 `--no-generate` 导出 JSON snapshot，再比较所有层的 tensor 数量、shape、dtype、连续性。必须固定模型 revision、设备、TP、`max-model-len`、`gpu-memory-utilization` 与 `block-size`，并保留 gate=0/1 JSON 作为 PR 证据。
+- 当前脚本刻意使用 `--no-generate`，仅验证初始化阶段；通过后还需要在具备 `_C_ascend.npu_scatter_pa_kv_cache_vllm` 的环境执行不带该标志的确定性生成 token 对比，作为端到端正确性证据。
