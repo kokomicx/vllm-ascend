@@ -523,3 +523,8 @@ vllm-ascend/
 
 - 用户对最新截图中的完整 PID 列表运行了 `ps -p`，并枚举全部 `VLLMWorker`/`EngineCore`/`vllm` 进程，均无输出；对 PID 2841539 的 `/proc` 父链循环同样未进入。这三项只读查询一致证明：在命令执行时，该批 worker 已不存在，不能从已失效 PID 读取启动用户、命令或父链。
 - 下一次排查必须在同一 SSH 会话中连续执行 `npu-smi info` 与 `ps`，不要使用之前的截图/PID；若新 `npu-smi` 仍显示占卡而 `ps` 立即为空，应保存带完整时间的两份原始输出并请管理员核对 NPU 驱动、容器 PID namespace 或调度器视图。仅凭本次 PID 消失仍不能归因于某个用户的 kill 操作。
+
+### 2026-07-16：确认 NPU 驱动全局 PID 与当前 shell PID namespace 不一致
+
+- 17:14:42 的新 `npu-smi info` 显示 PID 2841539--2841566 仍在设备侧持续运行：全部 16 张 Phy-ID 的 AICore 均为 100%，HBM 约 60.99--61.31 GiB，进程表中每个 worker 约 58.12--58.17 GiB；因此此前容器内 `ps` 的空结果不能再解释为该作业已结束。
+- 同一 PID 同时在 `npu-smi` 存在、在当前 shell 的 `/proc` 和 `ps` 不存在，最符合 Kubernetes/容器 PID namespace 隔离：`npu-smi` 从 Ascend 驱动的节点全局视图返回 host/其他容器 PID，而当前容器无权枚举其 `/proc`。应先检查 `/proc/1/ns/pid`、`/proc/$$/ns/pid` 和 `/proc/1/cgroup` 确认当前 namespace；要取得 `USER`/完整命令，必须由节点宿主机或有 `hostPID` 权限的管理员在 host PID namespace 上执行同一条 `ps` 命令，再通过容器/调度器记录映射到人。当前容器内不能可靠推断用户名，且不应自行 kill 作业。
