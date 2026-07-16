@@ -325,3 +325,9 @@ vllm-ascend/
 - k8s-node-48 已运行更新后的 `python -m pytest tests/test_phase3_layout_dispatch.py -q`，结果为 `21 passed, 17 warnings in 12.58s`。新增 token ID 比较器的回归用例已通过；17 条均为 PyTorch/OpenTelemetry/SWIG 弃用警告，非失败项。
 - 该服务器的模型分工：`/mnt/weights/Qwen3-30B-A3B` 是纯 GQA（`SplitKVLayout`）首选；`/mnt/weights/Qwen3.5-2B` 用于 Hybrid（attention `SplitKVLayout` + `MambaLayout`）；DeepSeek V2-Lite/V3.1 是 MLA，不用于当前第一阶段的 GQA/Hybrid 闭环。
 - 首轮建议 GQA 使用 Qwen3-30B-A3B 的 TP=1（若单卡权重/显存不足则再提升 TP），并分别运行默认初始化布局模式与 `--generate` token ID 严格对比模式；随后用 Qwen3.5-2B 重复同一流程。
+
+### 2026-07-16：k8s-node-48 NPU 可见卡选择
+
+- `ASCEND_RT_VISIBLE_DEVICES` 中应填写 `npu-smi info` 显示的实际 `Phy-ID`，而不是占位文本 `<free_npu>`；多个卡以逗号连接且不带空格。该变量须在启动验证脚本的同一 shell 中设置。
+- 本次 `k8s-node-48` 的 `npu-smi info` 中 Phy-ID `0` 到 `15` 均未列出用户进程，仅有约 2.8--3.2 GiB 的基础 HBM 占用，因此在资源约定允许的前提下均可作为候选。首次 GQA TP=1 可使用 `export ASCEND_RT_VISIBLE_DEVICES=0` 并配套 `--tensor-parallel-size 1`；TP=2 例如使用 `0,1` 并配套 `--tensor-parallel-size 2`。
+- 启动前应立即再次运行 `npu-smi info`，确认目标 Phy-ID 仍无进程；不得占用他人已申请或正在使用的卡。
