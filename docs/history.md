@@ -459,3 +459,9 @@ vllm-ascend/
 
 - 基线环境固定为 k8s-node-48：`MODEL=/mnt/weight/DeepSeek-V2-Lite-W8A8`、`ASCEND_RT_VISIBLE_DEVICES=0`、TP=1、`max-model-len=2048`、`gpu-memory-utilization=0.80`，并设置 OMP/MKL/OpenBLAS/NUMEXPR 线程数为 1。启动前复查 Phy-ID 0 无用户进程。
 - 先运行 Phase 3 单测；随后以 gate=1 先、gate=0 后的顺序，在预先创建并验证可写的独立目录中运行两次 `--no-generate` snapshot 并严格比较 metadata。metadata 通过后，在另一独立目录中用相同逆序运行两次真实生成，并以 `--require-generated-token-ids` 要求 token 序列一致。JSON 和日志目录均保留为 PR 证据。
+
+### 2026-07-16：DeepSeek-V2-Lite-W8A8 标准 MLA token parity 已通过
+
+- k8s-node-48 上的标准 MLA 真实生成比较已输出 `[PASS] All 27 layers match (shape + dtype + contiguous)` 和 `Generated token IDs: identical (8 tokens)`。gate=0 与 gate=1 均为 `/mnt/weight/DeepSeek-V2-Lite-W8A8`，生成文本同为 `”\n“I’m fine,`。
+- 27 层 cache 均为双 tensor MLA 结构，示例层形状为 `[8878, 128, 1, 512]`（KV latent，匹配 `kv_lora_rank=512`）与 `[8878, 128, 1, 64]`（RoPE 分量）；gate=0/1 的 tensor count、shape、dtype 和连续性均一致。由此标准 MLA 的真实 NPU 正确性闭环完成：单测、metadata parity、固定输入 token ID parity 均已具备。
+- `swigvarlink` 的 `DeprecationWarning` 为非阻塞第三方弃用警告，不影响比较结论。保留 `/tmp/kv_mla_baseline_layout` 和 `/tmp/kv_mla_baseline_tokens` 下 JSON/log 作为 PR 验证附件来源。
