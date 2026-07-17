@@ -615,6 +615,11 @@ vllm-ascend/
 - k8s-node-48 的 `npu-smi` 有 NPU group 0--7，共 8 张双芯 Ascend 910 板卡；每个 group 下有 Chip 0/1，对应两个独立、各 65536 MB HBM 的可见 Phy-ID，因而 vLLM 实际可使用 Phy-ID 0--15 共 16 个 NPU 芯片。此前“16 张卡”的说法应更正为“8 张双芯卡/16 个 NPU device”；`ASCEND_RT_VISIBLE_DEVICES` 和 `tensor_parallel_size` 按 16 个 Phy-ID/芯片计数，TP=16 合法且会使用全部 8 张板卡的两个芯。
 - 最新输出中所有 Phy-ID 0--15 均已有进程（host PID 714665--714779）并各占约 41.7 或 44.1 GiB，虽 AICore=0 但资源未释放；不得启动新的 TP=16 GLM 测试或自行终止这些尚未确认归属的进程。必须等待其所有者释放，或经资源管理员确认这些是本人的可清理残留后再运行。
 
+### 2026-07-17：GLM-W4A8 EngineCore 初始化失败日志判读
+
+- 用户提供的日志末尾显示 `EngineCore failed to start`、`WorkerProc initialization failed due to an exception in a background process` 和最终 `RuntimeError: Engine core initialization failed`；这些均为 vLLM 主进程收到 worker 失败后的包装错误，不是根因。最前面截断的超长 checkpoint key 集合（含 `weight_offset`、`weight_scale`、`scale_bias` 等 GLM W4A8/ModelSlim 量化键）强烈表明首个异常发生在 worker 权重/量化加载校验阶段。
+- 此段日志没有出现 `Available KV cache memory`、KV cache snapshot、layout allocate/reshape 或 generation，故失败发生在 KV layout 路径之前，不能作为 Sparse MLA gate=1 结果或归因于本次重构。必须从同一 `gate1_first.log` 提取最早的 `Traceback`、`Error`、`ValueError`/`KeyError`/`AssertionError` 及其前后文，确认是 checkpoint 不完整、vLLM/ModelSlim 量化格式不兼容还是具体 rank 的加载异常后再调整命令。
+
 ### 2026-07-17：会话记录约定确认
 
 - 已重新阅读并确认当前基线：layout-driven KV cache 重构已完成 GQA、Hybrid 和标准 MLA 的 gate=0/1 严格 metadata 与生成 token-ID 一致性验证；`GLM-5-w4a8` 是待执行真实 A/B 的 Sparse MLA 验证模型，后续仍需补齐其验证证据、无性能回归说明和 PR 整理。
