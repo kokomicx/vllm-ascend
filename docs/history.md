@@ -729,6 +729,12 @@ vllm-ascend/
 
 - 新增 `docs/KV_Cache_LayoutPlan_重构设计.md`，按“问题 → 目标边界 → 代码职责 → compressed MLA P0 修复机制 → 取舍 → 验证现状”的顺序说明本轮重构，并提供可直接用于导师沟通的 30 秒版本。文档明确本轮是 correctness-preserving 的职责重构，不主张未经基准证实的性能提升。
 
+### 2026-07-17：Attention Backend 与 Model Runner 的职责关系澄清
+
+- 在 vLLM V1 中，Model Runner 是 worker 内的请求执行与资源生命周期协调者：它接收 scheduler 输出，准备模型输入/metadata，维护 KV cache pool 的 raw buffer、slot/block table、跨层共享和模型层绑定，并驱动模型 forward；它不应定义某个 attention kernel 的专属 cache shape、dtype、stride 或字段偏移。
+- Attention Backend 是 attention 算子契约的提供者：它给出 backend 实现/metadata builder、支持的 kernel block size、KV cache shape，以及 kernel 对连续性、K/V 分离、dtype、stride/view 的要求。attention layer 在 forward 中从 runner 已绑定的 cache 和 backend metadata 取得输入，再调用对应 NPU attention/indexer 算子。
+- 上游 vLLM 通常以 `KVCacheSpec` 表达逻辑 cache，以 `KVCacheGroup` / `shared_by` 聚合可共享的层，并按 `page_size_bytes` 从统一 KV cache budget 计算 block 数和 raw storage；backend 再将其解释成 attention 可消费的逻辑 tensor/view。Ascend 当前 refactor 用 backend-owned `KVCacheLayoutPlan` 显式补齐“raw storage 如何拆为多个连续物理 tensor、如何 reshape/view”的契约，使 Runner 保持通用执行者角色。
+
 - 已重新阅读 `history.md` 并确认当前主线：Layout-driven KV cache 重构仍由 `VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH` feature gate 保护；GQA、Hybrid 和标准 MLA 已完成 gate=0/1 的 metadata 与生成 token-ID 一致性验证。
 - 当前最高优先级验证缺口为 `GLM-5-W4A8` 的 Sparse MLA 真实 NPU A/B 验证。测试 harness 已支持显式 `--quantization ascend`，但此前重试受目标 16 个 NPU device 的 HBM 占用影响；资源可用后应以 TP=16、gate=1/0 顺序运行，并保留完整日志和 snapshot。
 - 后续工作还包括补齐其余 Layout 的验证证据、性能/内存无回归数据、CI 映射与格式检查、提交整理和 PR review；在验证充分且获得评审认可前，不删除旧路径或默认开启 gate。
