@@ -605,6 +605,11 @@ vllm-ascend/
 
 - 完整 GLM-5-W4A8 真实生成 A/B 配置显式设置了 16 个 `ASCEND_RT_VISIBLE_DEVICES`（Phy-ID 0--15）且 `--tensor-parallel-size 16`，因此 gate=1 阶段独占 16 张卡、结束释放后 gate=0 阶段再独占同样 16 张卡；两阶段顺序运行，不会同时启动两组 16 卡作业。前置 `tests/test_phase3_layout_dispatch.py` 是 Python 单元测试，不会按该 TP 配置加载 392G 模型或长期占用 NPU。
 
+### 2026-07-17：GLM Sparse MLA 验证的单卡容量与 TP 下限判断
+
+- `npu-smi` 显示每张 Ascend 910 的 HBM 总量为 65536 MB，即约 64 GiB；`gpu-memory-utilization=0.80` 对应 vLLM 的目标总预算约 51.2 GiB/卡，设置 0.90 也仅约 57.6 GiB，不能突破 64 GiB 物理上限。
+- GLM-5-W4A8 checkpoint 实测为 391.11 GiB，纯权重平均值在 TP=16 时约 24.4 GiB/卡、TP=8 时约 48.9 GiB/卡、TP=4 时约 97.8 GiB/卡（已超过物理显存）。而此前 TP=16 在仅加载到 41/100 shard 时每卡已观测到约 37.8 GiB HBM；加载/量化转换/activation/MoE buffer 不会严格线性，但这是 TP=8 余量会非常紧甚至 OOM 的强信号。故 TP=16 是首轮正确性验证的推荐且保守方案；若资源必须减少，可在完整清理后将 TP=8、`gpu-memory-utilization=0.90` 作为高风险探索，不应承诺能启动，TP≤4 不可行。当前目录中没有已确认的小型 Sparse MLA 主模型可替代 392G GLM。
+
 ### 2026-07-17：会话记录约定确认
 
 - 已重新阅读并确认当前基线：layout-driven KV cache 重构已完成 GQA、Hybrid 和标准 MLA 的 gate=0/1 严格 metadata 与生成 token-ID 一致性验证；`GLM-5-w4a8` 是待执行真实 A/B 的 Sparse MLA 验证模型，后续仍需补齐其验证证据、无性能回归说明和 PR 整理。
