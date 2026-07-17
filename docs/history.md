@@ -735,6 +735,12 @@ vllm-ascend/
 - Attention Backend 是 attention 算子契约的提供者：它给出 backend 实现/metadata builder、支持的 kernel block size、KV cache shape，以及 kernel 对连续性、K/V 分离、dtype、stride/view 的要求。attention layer 在 forward 中从 runner 已绑定的 cache 和 backend metadata 取得输入，再调用对应 NPU attention/indexer 算子。
 - 上游 vLLM 通常以 `KVCacheSpec` 表达逻辑 cache，以 `KVCacheGroup` / `shared_by` 聚合可共享的层，并按 `page_size_bytes` 从统一 KV cache budget 计算 block 数和 raw storage；backend 再将其解释成 attention 可消费的逻辑 tensor/view。Ascend 当前 refactor 用 backend-owned `KVCacheLayoutPlan` 显式补齐“raw storage 如何拆为多个连续物理 tensor、如何 reshape/view”的契约，使 Runner 保持通用执行者角色。
 
+### 2026-07-17：Layout Plan 与上游 vLLM 对齐边界
+
+- `KVCacheLayoutPlan` 不应被定义为 vLLM 调度链之外的第四个管理层；它只能是 Ascend backend 的私有、每层（或每个共享 cache tensor）物理布局描述结果。上游仍应保持 `KVCacheSpec → KVCacheGroup/KVCacheConfig → block pool / scheduler → worker runner → backend/kernel` 主链：Spec/Group/manager 继续拥有 page size、block 分配、prefix cache、回收与预算，Plan 不得介入这些职责。
+- 当前改造在**职责方向**上与 vLLM 一致：backend 定义 kernel cache 契约，Runner 执行 allocation/reshape/bind；但在**公共接口形态**上尚非上游现有标准。上游 V1 主要以 `KVCacheSpec`、`KVCacheConfig` 和 backend `get_kv_cache_shape` 组织，而未提供统一的 `KVCacheLayoutPlan` API。因此 PR 表述应为 Ascend backend 为满足连续多 tensor 输入而增加的适配层，不应声称已实现上游通用抽象。
+- 下一步应收紧实现：Plan 只描述 `num_tensors/split_sizes/alignment/reshape`，不包含全局预算或 block 生命周期；优先让它成为 Ascend backend mixin 的内部返回值，避免把该方法 monkey-patch 为通用 `AttentionBackend` 公共契约；shared-by 兼容性应尽量在 group/config 形成阶段验证，而不是让 Runner 成为新的策略决策点。后续若上游正式引入 layer-aware KV layout/metadata API，再映射或迁移到该接口。
+
 - 已重新阅读 `history.md` 并确认当前主线：Layout-driven KV cache 重构仍由 `VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH` feature gate 保护；GQA、Hybrid 和标准 MLA 已完成 gate=0/1 的 metadata 与生成 token-ID 一致性验证。
 - 当前最高优先级验证缺口为 `GLM-5-W4A8` 的 Sparse MLA 真实 NPU A/B 验证。测试 harness 已支持显式 `--quantization ascend`，但此前重试受目标 16 个 NPU device 的 HBM 占用影响；资源可用后应以 TP=16、gate=1/0 顺序运行，并保留完整日志和 snapshot。
 - 后续工作还包括补齐其余 Layout 的验证证据、性能/内存无回归数据、CI 映射与格式检查、提交整理和 PR review；在验证充分且获得评审认可前，不删除旧路径或默认开启 gate。
