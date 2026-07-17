@@ -579,7 +579,7 @@ vllm-ascend/
 ### 2026-07-17：GLM-5-W4A8 TP=16 启动终端被 SIGKILL
 
 - 用户执行 GLM-5-W4A8 的 gate=1 TP=16 真实生成流程时，VS Code 报 `/bin/bash terminated with exit code: 137`。137 等于 128+SIGKILL(9)，说明 shell/容器被外部强制终止，而非 pytest、comparator 或 Python 的正常非零退出；因此本轮没有有效的 gate=1 snapshot，禁止继续运行 gate=0 或将其作为 Sparse MLA 结果。
-- 在 392G MoE 多 rank 权重加载阶段，优先排查宿主机或容器 cgroup OOM killer（CPU RAM/共享内存/页缓存峰值），其次排查资源调度器或管理员终止；NPU memory OOM 通常会有 worker traceback，不能仅由 137 定论。恢复环境后应立即收集 `dmesg -T`/`journalctl -k` OOM 记录、容器 `OOMKilled` 状态、cgroup memory limit/current 和 gate1 日志末尾，再决定是提高容器内存/调整挂载，还是以 TP=8 等配置重试。 
+- 在 392G MoE 多 rank 权重加载阶段，优先排查宿主机或容器 cgroup OOM killer（CPU RAM/共享内存/页缓存峰值），其次排查资源调度器或管理员终止；NPU memory OOM 通常会有 worker traceback，不能仅由 137 定论。恢复环境后应立即收集 `dmesg -T`/`journalctl -k` OOM 记录、容器 `OOMKilled` 状态、cgroup memory limit/current 和 gate1 日志末尾，再决定是提高容器内存/调整挂载，还是以 TP=8 等配置重试。
 
 ### 2026-07-17：会话记录约定确认
 
