@@ -635,6 +635,11 @@ vllm-ascend/
 - `tests/e2e/test_layout_correctness.py` 的 `generate_and_capture()` 新增默认 `None` 的 `quantization` 参数，并原样传给 `LLM(...)`；直接执行入口新增 `--quantization` CLI 参数，生成 snapshot 和终端摘要都记录实际值。默认不传时仍为 `None`，故已验证的 GQA、Hybrid、标准 MLA 流程不变；GLM W4A8 的 gate=1/0 则必须都传 `--quantization ascend`。
 - 已对该文件执行 `python -m py_compile tests/e2e/test_layout_correctness.py`，语法通过。文件中存在用户原有的 import/cleanup/assert/help 文本格式化改动；本次只交付量化参数的 6 个功能 hunks，格式化改动保持未暂存、未纳入提交。
 
+### 2026-07-17：显式量化重试被已有 NPU 占用阻断
+
+- 新日志中的 `Qwen2VLImageProcessorFast` 弃用提示、`enforce_eager` 导致的 compilation/CUDAGraph disabled 提示以及单节点 Gloo loopback warning 都不是启动失败原因。真正首个异常位于 `vllm_ascend/worker/worker.py:_init_device()`：多个 TP worker 报 `Free memory on device (5.44/61.28 GiB)` 或 `(27.76/61.28 GiB) ... less than desired GPU memory utilization (0.8, 49.02 GiB)`。
+- 即本次 GLM 测试在 device init 阶段就因已有进程占用 HBM 而失败，尚未进入权重加载；无法据此判断 `--quantization ascend` 的 W4A8 修复是否生效，也没有任何 KV layout 结果。TP=16、0.80 配置要求每个可见 Phy-ID 启动时至少约 49.02 GiB 空闲，当前有卡仅余 5.44 GiB 或 27.76 GiB，必须等待/协调占用作业完全释放所有 16 个目标芯片后重试；不应仅把 gpu-memory-utilization 降到能绕过启动检查，因为 391 GiB GLM 权重和后续 Sparse cache 仍需要实质显存容量。
+
 ### 2026-07-17：会话记录约定确认
 
 - 已重新阅读并确认当前基线：layout-driven KV cache 重构已完成 GQA、Hybrid 和标准 MLA 的 gate=0/1 严格 metadata 与生成 token-ID 一致性验证；`GLM-5-w4a8` 是待执行真实 A/B 的 Sparse MLA 验证模型，后续仍需补齐其验证证据、无性能回归说明和 PR 整理。
