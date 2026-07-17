@@ -554,3 +554,8 @@ vllm-ascend/
 
 - 跨服务器迁移应区分 Docker image、container 的可写层和外部数据卷：先从当前运行容器 `docker commit` 出一个版本化镜像，再以 `docker save` 导出 tar、经 SSH/SCP 传输、在目标服务器 `docker load` 并用同样的 Ascend device、驱动相关挂载、工作目录和 `/mnt:/mnt` 重新 `docker run`。不要将模型权重目录 `/mnt` 打进 image；它通常体积大、更新频繁，应作为目标机已存在或单独同步的挂载目录。
 - 创建前必须验证两台服务器的宿主机 Ascend 驱动/CANN 与镜像中 torch-npu/vLLM-Ascend 版本兼容；`docker save/load` 不能迁移 NPU 驱动或宿主机内核模块。传输完成后以 `docker image inspect` 校验镜像 ID、以容器内 `npu-smi info`、Python import 和 Phase 3 单测验证。认证信息不得写入 shell 历史、命令文本、Git 或 history.md；用户曾在对话中明文提供目标机 root 密码，建议任务结束后轮换该凭据。
+
+### 2026-07-17：目标服务器 Remote-SSH 连接失败定位
+
+- Windows VS Code Remote-SSH 日志显示已成功找到 `C:\\windows\\System32\\OpenSSH\\ssh.exe`（OpenSSH 9.5），但连接 `80.48.29.125` 时在 17 秒后明确报 `ssh: connect to host 80.48.29.125 port 22: Connection timed out`。因此失败发生在 TCP 网络连接层，尚未进入用户名/密码认证、远端 shell、Docker 或 VS Code Server 安装。
+- 日志中的前置 `spawn ... ssh.exe ENOENT` 是扩展逐个探测候选路径的正常噪声，最后找到 OpenSSH 后不构成故障；中文乱码的管道错误是 SSH 子进程超时退出后的次生错误。应从本机以 `Test-NetConnection 80.48.29.125 -Port 22` 验证网络，从目标机控制台检查 IP/路由、`sshd` 监听 22、宿主机防火墙/安全组/VPN/跳板策略；网络连通后再配置 Remote-SSH，不应先排查 VS Code Server。
