@@ -645,6 +645,7 @@ vllm-ascend/
 - 最新 `npu-smi info` 显示 Phy-ID 0--15 的 HBM 使用量均约 2921--3212 MiB / 65536 MiB，对应每个逻辑 NPU 仍有约 60.8 GiB 可用；已超过 TP=16、`--gpu-memory-utilization 0.80` 启动所需的约 49.02 GiB。进程表中的 16 个 PID 每个仅显示 64 MiB，不构成此前数十 GiB 的占用状态。可使用既定的 `--quantization ascend`、TP=16 gate=1/0 A/B 命令重新开始测试。
 - 已给出无需 `tmux` 的 `nohup + setsid` 完整测试流程：在独立时间戳目录保存单测、gate=1、gate=0 和最终比对日志；两次引擎启动均显式传 `--quantization ascend`、TP=16、`max-model-len=2048`、`gpu-memory-utilization=0.80`，并以 `--require-generated-token-ids` 作为最终严格正确性判定。
 - 首次按该流程执行时，后台 `nohup` 任务已结束于 gate=1 引擎初始化；终端尾部仅包含 vLLM 父进程的 `RuntimeError: Engine core initialization failed` 和 Ascend `ERR99999` 汇总信息，均非根因。gate=0 与最终 comparator 因 `set -e` 未执行。必须从同一 `RUN_DIR/gate1_first.log` 中定位该汇总信息之前的第一条具体 `Traceback` / `ValueError` / `RuntimeError` 后再决定修复方向。
+- 已从 `gate1_first.log` 定位根因：TP11 在 `vllm/model_executor/model_loader/weight_utils.py:safetensors_weights_iterator()` 的 `safe_open(..., framework="pt").get_tensor(name)` 读取阶段抛出 `ValueError: could not determine the shape of object type 'torch.storage.UntypedStorage'`。这发生于权重载入、KV cache 创建之前，故与 Layout gate=1 重构、显存容量和 Sparse MLA 算子无关；显式 `--quantization ascend` 已传入但不能修复 checkpoint tensor 反序列化。待通过单进程 safetensors 扫描定位具体 shard/tensor，并核对服务器的 `torch`、`torch_npu`、`safetensors` 版本与该 ModelSlim W4A8 checkpoint 的生成环境兼容性。
 
 ### 2026-07-17：会话记录约定确认
 
