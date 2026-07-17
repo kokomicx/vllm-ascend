@@ -644,6 +644,7 @@ vllm-ascend/
 
 - 最新 `npu-smi info` 显示 Phy-ID 0--15 的 HBM 使用量均约 2921--3212 MiB / 65536 MiB，对应每个逻辑 NPU 仍有约 60.8 GiB 可用；已超过 TP=16、`--gpu-memory-utilization 0.80` 启动所需的约 49.02 GiB。进程表中的 16 个 PID 每个仅显示 64 MiB，不构成此前数十 GiB 的占用状态。可使用既定的 `--quantization ascend`、TP=16 gate=1/0 A/B 命令重新开始测试。
 - 已给出无需 `tmux` 的 `nohup + setsid` 完整测试流程：在独立时间戳目录保存单测、gate=1、gate=0 和最终比对日志；两次引擎启动均显式传 `--quantization ascend`、TP=16、`max-model-len=2048`、`gpu-memory-utilization=0.80`，并以 `--require-generated-token-ids` 作为最终严格正确性判定。
+- 首次按该流程执行时，后台 `nohup` 任务已结束于 gate=1 引擎初始化；终端尾部仅包含 vLLM 父进程的 `RuntimeError: Engine core initialization failed` 和 Ascend `ERR99999` 汇总信息，均非根因。gate=0 与最终 comparator 因 `set -e` 未执行。必须从同一 `RUN_DIR/gate1_first.log` 中定位该汇总信息之前的第一条具体 `Traceback` / `ValueError` / `RuntimeError` 后再决定修复方向。
 
 ### 2026-07-17：会话记录约定确认
 
@@ -691,6 +692,11 @@ vllm-ascend/
 - 新版先单独解释社区 vLLM 的 `KVCacheSpec → KVCacheGroup/shared_by → page_size_bytes/num_blocks → raw storage + logical view` 管理管线，再解释 Ascend 为满足 NPU 算子连续输入而在 host 侧预拆 physical tensors 的路径；避免把“一个 page”“一个逻辑 tensor”“一个物理 tensor”混为一谈。
 - 每个模型都采用一致的字段条、token 重复形成 block/page、N 个 block 形成 tensor 的图形粒度：GQA（K/V）、标准 MLA（latent/NoPE + K-RoPE）、SFA bf16（latent + RoPE + Indexer K，3 tensors）、SFA FP8/C8（额外 Scale，强调 dtype/page bytes/tensor 数的组合变化）和 Hybrid（Mamba state + K/V + padding）。
 - 已通过 PowerPoint 导出预览逐页做视觉检查，并修正第 14 页标题溢出；生成文件可正常打开，共 15 页。
+
+### 2026-07-17：术语澄清——“MLA cache 末维打包”
+
+- “末维打包”不是压缩、也不是把多个 token 或多个 block 拼在一起；它表示对于**同一个 token**，将 MLA 的多个逻辑字段沿 cache tensor 的最后一维连续存放。例如标准 MLA 可概念化为 `cache[n, b, 0:512] = latent/NoPE`，`cache[n, b, 512:576] = K-RoPE`，因此整体逻辑 shape 为 `(N, B, 576)`（实际实现可有等价的单头维）。
+- 社区 vLLM/Backend 可将该 tensor 作为一个逻辑 cache 管理，kernel 按末维 slice/offset 访问字段；vLLM-Ascend 当前为满足算子的连续 tensor 输入，通常将该逻辑末维的两段预拆为 `nope_cache` 与 `rope_cache`。PPT 讲解时宜使用“同一 token 的字段沿最后一维连续排列（kernel 按 offset 切分）”替代单独的“末维打包”，以减少歧义。
 
 ### 2026-07-17：会话基线复核与持续记录约定
 
