@@ -7,9 +7,10 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
 )
+from vllm_ascend.attention.kv_cache_layout import AscendKVCacheLayoutBackendMixin
 
 
-class AscendFABackend(AttentionBackend):
+class AscendFABackend(AscendKVCacheLayoutBackendMixin, AttentionBackend):
     def __init__(self):
         super().__init__()
 
@@ -31,7 +32,7 @@ class AscendFABackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-        cache_type: str = "",
+        cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 

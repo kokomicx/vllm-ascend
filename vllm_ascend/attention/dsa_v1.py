@@ -17,6 +17,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.kv_cache_layout import AscendKVCacheLayoutBackendMixin
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
@@ -168,7 +169,7 @@ def pad_to_blocks(x: torch.Tensor, length_list: torch.Tensor, block_size: int = 
     return out
 
 
-class AscendDSABackend(AttentionBackend):
+class AscendDSABackend(AscendKVCacheLayoutBackendMixin, AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod

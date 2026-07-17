@@ -41,6 +41,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.attention.kv_cache_layout import AscendKVCacheLayoutBackendMixin
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
 from vllm_ascend.attention.kvcomp_attn.attention_utils import (
@@ -78,7 +79,7 @@ _HMA_DEBUG_ENABLED = True
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
-class AscendAttentionBackend(AttentionBackend):
+class AscendAttentionBackend(AscendKVCacheLayoutBackendMixin, AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod

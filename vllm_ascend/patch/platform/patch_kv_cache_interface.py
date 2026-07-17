@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
+from vllm.v1.attention.backend import AttentionBackend
 
 
 @dataclass(frozen=True)
@@ -319,3 +320,35 @@ MambaSpec.get_kv_cache_layout = _mamba_get_kv_cache_layout
 FullAttentionSpec.get_kv_cache_layout = _full_attention_get_kv_cache_layout
 KVCacheSpec.get_kv_cache_layout = _kvcachespec_get_kv_cache_layout
 HiddenStateCacheSpec.get_kv_cache_layout = _hidden_state_get_kv_cache_layout
+
+
+def _backend_get_kv_cache_layout_plan(
+    cls,
+    spec,
+    *,
+    layer_name: str,
+    vllm_config: VllmConfig,
+    is_hybrid_model: bool = False,
+):
+    """Compatibility plan provider for upstream backends such as Mamba.
+
+    Ascend attention backends inherit the mixin directly. Upstream Mamba
+    backends still need the same backend-owned contract while the gate is
+    enabled, so install this classmethod on their common base class.
+    """
+    from vllm_ascend.attention.kv_cache_layout import (
+        AscendKVCacheLayoutBackendMixin,
+    )
+
+    return AscendKVCacheLayoutBackendMixin.get_kv_cache_layout_plan.__func__(
+        cls,
+        spec,
+        layer_name=layer_name,
+        vllm_config=vllm_config,
+        is_hybrid_model=is_hybrid_model,
+    )
+
+
+# The mixin overrides this on Ascend backends. This base-class fallback covers
+# upstream Mamba and other non-Ascend backends selected in hybrid models.
+AttentionBackend.get_kv_cache_layout_plan = classmethod(_backend_get_kv_cache_layout_plan)

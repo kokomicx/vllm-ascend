@@ -718,6 +718,13 @@ vllm-ascend/
 
 ### 2026-07-17：会话基线复核与持续记录约定
 
+### 2026-07-17：Layout Plan 后端化实现（进行中）
+
+- 按导师提出的边界调整，新增 `vllm_ascend/attention/kv_cache_layout.py`。Ascend attention backend 现在通过 `get_kv_cache_layout_plan(spec, layer_name, vllm_config, is_hybrid_model)` 返回不可变 `KVCacheLayoutPlan`；Plan 绑定 layout、backend、spec、head dimensions、量化上下文和 cache dtype，并统一提供 `split_sizes()`、`reshape()`、对齐需求。
+- `vllm_ascend/worker/model_runner_v1.py` 的 gate=1 路径已移除对 MLA/Sparse/Compressed/Mamba/cache-only 的 Layout 选择、`_build_layout_kwargs()` 与 `raw_is_tuple` 反推。Runner 仅获取每层 backend、检查 shared-by 层的 Plan 物理分配契约一致、分配 raw int8 buffer，并调用 Plan reshape/bind；上游 Mamba backend 也通过 `AttentionBackend` 的兼容 Plan provider 接入同一契约。
+- 这直接修复静态审计中的 compressed MLA P0：此前 reshape 会因 raw buffer 恰好为单 tensor 而把 `CompressedMLALayout` 覆盖成 `SingleTensorLayout`，从而跳过 compressed MLA 所需的 scale/overlay `as_strided` view；现在 reshape 始终使用 allocation 阶段 backend 已生成的同一份 Plan。普通 Attention 的 Plan 同时传递 `cache_dtype_str` 给 backend shape 查询，覆盖此前 v2 遗漏非默认 cache dtype 的 P1 风险；FA3 与 310P backend 的参数名已对齐。
+- 新增 `tests/test_backend_kv_cache_layout_plan.py`，覆盖 FullAttention 的 SplitKV Plan、compressed MLA Plan 不被降级，以及 hybrid Attention 单 tensor 策略由 backend 决定；同步更新 Phase 3 的 API 存在性断言。Windows 本地仅完成 `py_compile`（本机无 torch，pytest 收集会报 `ModuleNotFoundError: torch`）；推送后须在 NPU 环境运行 `python -m pytest tests/test_backend_kv_cache_layout_plan.py tests/test_phase3_layout_dispatch.py -q`，随后重跑既有 GQA、Hybrid、标准 MLA 的 gate=0/1 token parity。Sparse MLA 仍受 GLM-5 W4A8 多进程 safetensors loader 初始化问题阻塞，与本次 layout plan 代码无直接证据关联。
+
 - 已重新阅读 `history.md` 并确认当前主线：Layout-driven KV cache 重构仍由 `VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH` feature gate 保护；GQA、Hybrid 和标准 MLA 已完成 gate=0/1 的 metadata 与生成 token-ID 一致性验证。
 - 当前最高优先级验证缺口为 `GLM-5-W4A8` 的 Sparse MLA 真实 NPU A/B 验证。测试 harness 已支持显式 `--quantization ascend`，但此前重试受目标 16 个 NPU device 的 HBM 占用影响；资源可用后应以 TP=16、gate=1/0 顺序运行，并保留完整日志和 snapshot。
 - 后续工作还包括补齐其余 Layout 的验证证据、性能/内存无回归数据、CI 映射与格式检查、提交整理和 PR review；在验证充分且获得评审认可前，不删除旧路径或默认开启 gate。

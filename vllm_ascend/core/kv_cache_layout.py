@@ -23,22 +23,24 @@ zero changes to the allocate/reshape dispatch code in the model runner.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
-
 from vllm.utils.torch_utils import get_dtype_size
+
 from vllm_ascend.utils import calc_split_factor
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.attention.backend import AttentionBackend
-    from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 
 # ---------------------------------------------------------------------------
 # Utility: carve memory views from a flat buffer via torch.as_strided
 # ---------------------------------------------------------------------------
+
 
 def adjust_kv_layout(
     raw_tensor: torch.Tensor,
@@ -77,8 +79,7 @@ def adjust_kv_layout(
         stride_ref = torch.empty(shape).stride()
         target_stride = (num_elements_per_page, *stride_ref[1:])
         assert storage_offset_bytes % dtype_size == 0, (
-            f"Storage offset {storage_offset_bytes} is not aligned to "
-            f"dtype {dtype} size {dtype_size}"
+            f"Storage offset {storage_offset_bytes} is not aligned to dtype {dtype} size {dtype_size}"
         )
         view = torch.as_strided(
             raw_tensor.view(dtype),
@@ -92,9 +93,32 @@ def adjust_kv_layout(
     return reshaped
 
 
+def get_backend_kv_cache_shape(
+    backend: AttentionBackend,
+    num_blocks: int,
+    block_size: int,
+    num_kv_heads: int,
+    head_size: int,
+    cache_dtype_str: str | None = None,
+) -> tuple[int, ...]:
+    """Query a backend shape while preserving cache-dtype context when needed."""
+    if cache_dtype_str is None:
+        return backend.get_kv_cache_shape(
+            num_blocks, block_size, num_kv_heads, head_size,
+        )
+    return backend.get_kv_cache_shape(
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        cache_dtype_str=cache_dtype_str,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Abstract base
 # ---------------------------------------------------------------------------
+
 
 class KVCacheLayout(ABC):
     """Abstract physical memory layout for KV cache tensors.
@@ -169,9 +193,75 @@ class KVCacheLayout(ABC):
         return False
 
 
+@dataclass(frozen=True)
+class KVCacheLayoutPlan:
+    """Backend-owned, immutable execution plan for one layer's KV cache.
+
+    A plan binds a physical layout to the backend that consumes it and keeps
+    all layout-specific context out of ``NPUModelRunner``. The runner only
+    allocates the byte sizes returned here and asks the plan to reshape them.
+    """
+
+    layout: KVCacheLayout
+    spec: AttentionSpec
+    backend: AttentionBackend
+    layer_name: str
+    vllm_config: VllmConfig
+    head_dims: tuple[int, int] | None = None
+    quant_config: Any = None
+    cache_dtype_str: str | None = None
+
+    @property
+    def num_tensors(self) -> int:
+        return self.layout.num_tensors()
+
+    @property
+    def needs_alignment(self) -> bool:
+        return self.layout.needs_alignment()
+
+    def _layout_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "layer_name": self.layer_name,
+            "cache_dtype_str": self.cache_dtype_str,
+        }
+        if self.head_dims is not None:
+            kwargs["head_dims"] = self.head_dims
+        if self.quant_config is not None:
+            kwargs["quant_config"] = self.quant_config
+        return kwargs
+
+    def split_sizes(self, total_bytes: int) -> list[int]:
+        return self.layout.split_sizes(
+            total_bytes,
+            self.spec,
+            vllm_config=self.vllm_config,
+            **self._layout_kwargs(),
+        )
+
+    def reshape(
+        self,
+        raw_tensors: list[torch.Tensor],
+        *,
+        num_blocks: int,
+        kernel_num_blocks: int,
+        kernel_block_size: int,
+    ) -> Any:
+        return self.layout.reshape(
+            raw_tensors,
+            self.spec,
+            num_blocks=num_blocks,
+            kernel_num_blocks=kernel_num_blocks,
+            kernel_block_size=kernel_block_size,
+            backend=self.backend,
+            vllm_config=self.vllm_config,
+            **self._layout_kwargs(),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Layout 1: SingleTensorLayout
 # ---------------------------------------------------------------------------
+
 
 class SingleTensorLayout(KVCacheLayout):
     """A single flat tensor, reshaped with a simple ``.view(dtype).view(shape)``.
@@ -207,11 +297,13 @@ class SingleTensorLayout(KVCacheLayout):
         **kwargs: Any,
     ) -> torch.Tensor:
         raw = raw_tensors[0]
-        kv_cache_shape = backend.get_kv_cache_shape(
+        kv_cache_shape = get_backend_kv_cache_shape(
+            backend,
             kernel_num_blocks,
             kernel_block_size,
             spec.num_kv_heads,
             spec.head_size,
+            kwargs.get("cache_dtype_str"),
         )
         return raw.view(spec.dtype).view(kv_cache_shape)
 
@@ -219,6 +311,7 @@ class SingleTensorLayout(KVCacheLayout):
 # ---------------------------------------------------------------------------
 # Layout 2: SplitKVLayout
 # ---------------------------------------------------------------------------
+
 
 class SplitKVLayout(KVCacheLayout):
     """Two physically separate tensors — one for K, one for V.
@@ -252,9 +345,7 @@ class SplitKVLayout(KVCacheLayout):
         quant_config = kwargs.get("quant_config")
 
         if quant_config is not None and vllm_config is not None:
-            k_factor, v_factor = quant_config.get_kv_quant_split_factor(
-                layer_name, [k_dim, v_dim]
-            )
+            k_factor, v_factor = quant_config.get_kv_quant_split_factor(layer_name, [k_dim, v_dim])
         else:
             k_factor, v_factor = calc_split_factor([k_dim, v_dim])
 
@@ -275,11 +366,13 @@ class SplitKVLayout(KVCacheLayout):
         k_dim, v_dim = head_dims
         layer_name: str = kwargs.get("layer_name", "")
 
-        kv_cache_shape = backend.get_kv_cache_shape(
+        kv_cache_shape = get_backend_kv_cache_shape(
+            backend,
             kernel_num_blocks,
             kernel_block_size,
             spec.num_kv_heads,
             spec.head_size,
+            kwargs.get("cache_dtype_str"),
         )
         # FA3/Attention backends return (2, N, BS, H, D) with a leading 2×
         # K/V factor.  SplitKVLayout handles separate K/V tensors, so drop
@@ -295,9 +388,7 @@ class SplitKVLayout(KVCacheLayout):
         k_dtype = v_dtype = spec.dtype
         quant_config = kwargs.get("quant_config")
         if quant_config is not None and vllm_config is not None:
-            k_dtype, v_dtype = quant_config.get_kv_quant_dtype(
-                layer_name, spec.dtype, vllm_config.model_config
-            )
+            k_dtype, v_dtype = quant_config.get_kv_quant_dtype(layer_name, spec.dtype, vllm_config.model_config)
 
         k_cache = raw_tensors[0].view(k_dtype).view(k_shape)
         v_cache = raw_tensors[1].view(v_dtype).view(v_shape)
@@ -311,6 +402,7 @@ class SplitKVLayout(KVCacheLayout):
 # ---------------------------------------------------------------------------
 # Layout 3: SparseMLALayout
 # ---------------------------------------------------------------------------
+
 
 class SparseMLALayout(KVCacheLayout):
     """Three physically separate tensors for sparse MLA (no C8 quantization).
@@ -389,6 +481,7 @@ class SparseMLALayout(KVCacheLayout):
 # ---------------------------------------------------------------------------
 # Layout 4: SparseMLAC8Layout
 # ---------------------------------------------------------------------------
+
 
 class SparseMLAC8Layout(KVCacheLayout):
     """Four physically separate tensors for sparse MLA **with** C8 quantization.
@@ -478,6 +571,7 @@ class SparseMLAC8Layout(KVCacheLayout):
 # ---------------------------------------------------------------------------
 # Layout 5: CompressedMLALayout
 # ---------------------------------------------------------------------------
+
 
 class CompressedMLALayout(KVCacheLayout):
     """Single physical buffer with multiple ``as_strided`` overlay views.
@@ -577,6 +671,7 @@ class CompressedMLALayout(KVCacheLayout):
 # Layout 6: MambaLayout
 # ---------------------------------------------------------------------------
 
+
 class MambaLayout(KVCacheLayout):
     """Multi-state carving from a single flat buffer.
 
@@ -614,9 +709,7 @@ class MambaLayout(KVCacheLayout):
         **kwargs: Any,
     ) -> list[torch.Tensor]:
         raw = raw_tensors[0]
-        shapes_with_blocks = tuple(
-            (num_blocks, *shape) for shape in spec.shapes
-        )
+        shapes_with_blocks = tuple((num_blocks, *shape) for shape in spec.shapes)
         return adjust_kv_layout(
             raw,
             shapes_with_blocks,
@@ -631,6 +724,7 @@ class MambaLayout(KVCacheLayout):
 
 __all__ = [
     "KVCacheLayout",
+    "KVCacheLayoutPlan",
     "SingleTensorLayout",
     "SplitKVLayout",
     "SparseMLALayout",
@@ -638,4 +732,5 @@ __all__ = [
     "CompressedMLALayout",
     "MambaLayout",
     "adjust_kv_layout",
+    "get_backend_kv_cache_shape",
 ]
