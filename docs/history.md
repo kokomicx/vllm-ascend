@@ -630,6 +630,11 @@ vllm-ascend/
 - `/home/weight/GLM-5-w4a8/quant_model_description.json` 存在（17 MiB）、可解析且含 233925 个顶层条目；`quant_model_weights.safetensors.index.json` 含 233921 个 weight entries、100 个 shard，所有 index 引用的 shard 文件均存在。该证据显著降低了“目录不完整/缺 shard”的可能性，不能证明参数映射完全正确但足以停止重复下载或复制权重。
 - 同一 `config.json` 为 `model_type=glm_moe_dsa`、`architectures=GlmMoeDsaForCausalLM`，但 `quantization_config=None`、`quantization=None`。因此测试 harness 不能可靠地从 HF config 自动识别 W4A8；应显式以 `quantization="ascend"` 创建 vLLM `LLM`，使 ModelSlim quant config 走确定路径并避免把量化 checkpoint 用非量化 strict tracker 校验。当前 `tests/e2e/test_layout_correctness.py` 的 `LLM(...)` 没有传递 quantization，也没有 CLI 参数；本地 vLLM `LLM.__init__` 支持该参数。下一步为向 harness 增加默认 `None` 的 `--quantization` 参数并在 GLM gate=0/1 都传 `--quantization ascend`。该测试文件当前已有用户未提交的格式化改动，修改前需保持这些改动不被覆盖或误提交。
 
+### 2026-07-17：测试 harness 支持显式 Ascend ModelSlim 量化
+
+- `tests/e2e/test_layout_correctness.py` 的 `generate_and_capture()` 新增默认 `None` 的 `quantization` 参数，并原样传给 `LLM(...)`；直接执行入口新增 `--quantization` CLI 参数，生成 snapshot 和终端摘要都记录实际值。默认不传时仍为 `None`，故已验证的 GQA、Hybrid、标准 MLA 流程不变；GLM W4A8 的 gate=1/0 则必须都传 `--quantization ascend`。
+- 已对该文件执行 `python -m py_compile tests/e2e/test_layout_correctness.py`，语法通过。文件中存在用户原有的 import/cleanup/assert/help 文本格式化改动；本次只交付量化参数的 6 个功能 hunks，格式化改动保持未暂存、未纳入提交。
+
 ### 2026-07-17：会话记录约定确认
 
 - 已重新阅读并确认当前基线：layout-driven KV cache 重构已完成 GQA、Hybrid 和标准 MLA 的 gate=0/1 严格 metadata 与生成 token-ID 一致性验证；`GLM-5-w4a8` 是待执行真实 A/B 的 Sparse MLA 验证模型，后续仍需补齐其验证证据、无性能回归说明和 PR 整理。

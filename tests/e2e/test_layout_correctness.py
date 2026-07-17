@@ -52,6 +52,7 @@ def generate_and_capture(
     no_generate: bool = False,
     tensor_parallel_size: int = 1,
     gpu_memory_utilization: float = 0.30,
+    quantization: str | None = None,
 ) -> dict[str, Any]:
     """Load a model, optionally run one short generation, capture KV cache metadata.
 
@@ -78,6 +79,7 @@ def generate_and_capture(
             gpu_memory_utilization=gpu_memory_utilization,
             tensor_parallel_size=tensor_parallel_size,
             trust_remote_code=True,
+            quantization=quantization,
         )
 
         generated_token_ids: list[int] | None = None
@@ -99,6 +101,7 @@ def generate_and_capture(
         snapshot["generated_token_ids"] = generated_token_ids
         snapshot["model"] = model
         snapshot["max_model_len"] = max_model_len
+        snapshot["quantization"] = quantization
 
         # Clean up
         del llm
@@ -214,6 +217,11 @@ if __name__ == "__main__":
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.30)
     parser.add_argument(
+        "--quantization",
+        default=None,
+        help="Explicit vLLM quantization method (for example: ascend).",
+    )
+    parser.add_argument(
         "--no-generate",
         action="store_true",
         help="Skip generation (forward pass) — only capture KV cache shapes "
@@ -227,6 +235,7 @@ if __name__ == "__main__":
         no_generate=args.no_generate,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        quantization=args.quantization,
     )
 
     output_path = args.output
@@ -241,6 +250,7 @@ if __name__ == "__main__":
     print(f"\nSnapshot saved to {output_path}")
     print(f"  Gate enabled : {snapshot['gate_enabled']}")
     print(f"  Num layers   : {snapshot['num_layers']}")
+    print(f"  Quantization : {snapshot['quantization']!r}")
     print(f"  Generated    : {snapshot['generated_text']!r}")
     print(f"  Token IDs    : {snapshot['generated_token_ids']!r}")
     for name, entry in snapshot["layers"].items():
