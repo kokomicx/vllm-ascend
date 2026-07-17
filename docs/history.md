@@ -586,6 +586,11 @@ vllm-ascend/
 - 11:01 的 `npu-smi` 显示 16 个进程（host PID 3488814--3488829）仍各占约 37.812--37.813 GiB HBM，但 AICore 全为 0；与 gate1 日志中 10:55 启动的 16 个 TP worker 时间、数量一致，极可能是本次 GLM 作业的残留 worker。日志确认 Gloo/HCCL 的 world-size=16 建连成功，随后开始加载 `/home/weight/GLM-5-w4a8`；checkpoint 391.11 GiB、可用 RAM 931.56 GiB，读取进度停在 41/100 shard（约 2 分钟）后不再推进。
 - 本次 `dmesg -T` 中未匹配到 OOM/killed-process 记录，`journalctl` 在当前环境不存在；这不足以完全排除 cgroup/外部 kill，但可确认失败点在模型权重加载中，尚未进入 KV cache allocation、layout dispatch、生成或 comparator。不要等待或重跑第二条 gate=0；先在 host PID namespace 用 `ps` 验证这 16 个 PID 的命令行和 cgroup，确认属于本次 `/home/weight/GLM-5-w4a8` 作业后，以正常 SIGTERM 清理残留 worker，待卡和进程均释放后再针对终端/容器外部终止原因调整运行方式。
 
+### 2026-07-17：排除 GLM 启动容器 cgroup memory limit
+
+- 当前环境是 cgroup v1，`memory.limit_in_bytes=9223372036854771712`（约 8 EiB、接近 signed 64-bit 最大值），表示未施加实际容器内存上限；`memory.usage_in_bytes=201385803776`，约 187.6 GiB。结合 gate1 日志在加载前报告可用 RAM 931.56 GiB、且 `dmesg` 未出现 OOM 证据，不能将 exit 137 归因于 Docker/cgroup 的内存 hard limit。
+- 当前更高概率是 VS Code Remote terminal 生命周期、SSH/容器会话或外部资源管理层对前台 shell 的 SIGKILL；仍需先通过 host `ps` 确认并清理本次遗留 worker。下一次长时间 GLM 启动应在确认资源释放后放入 `tmux`（或 `setsid`/`nohup`）会话，日志写入独立文件，避免仅因 VS Code 前台终端断开而失去父进程；但若 tmux 也被杀，再向节点管理员索取调度器/宿主机审计信息。
+
 ### 2026-07-17：会话记录约定确认
 
 - 已重新阅读并确认当前基线：layout-driven KV cache 重构已完成 GQA、Hybrid 和标准 MLA 的 gate=0/1 严格 metadata 与生成 token-ID 一致性验证；`GLM-5-w4a8` 是待执行真实 A/B 的 Sparse MLA 验证模型，后续仍需补齐其验证证据、无性能回归说明和 PR 整理。
@@ -598,3 +603,11 @@ vllm-ascend/
 - 新增统一的 Shape / 内部字段布局页：GQA（K/V）、Dense MLA（latent KV/K-RoPE）、SFA（latent KV/K-RoPE/indexer/可选 scale）和 Hybrid（Mamba state + Attention K/V + padding）统一在一页展示，并明确色块是字段语义而非强制 raw allocation 数量。
 - SFA（GLM5.1）已从“Sparce MLA”合并表述中独立出来：其与 Sparse MLA 共享部分存储模式，但拥有稀疏检索、indexer cache、量化 scale 和独立算子依赖，需在 Task 2 中单独确认与验证；材料避免把它误表述为完全同义的模型类别。
 - 已增加“与社区对齐”的可执行定义：先以 `KVCacheLayout` 让 Backend 显式表达多 tensor 的尺寸、dtype、切分与 reshape，随后逐算子确认 stride / storage offset / overlay / K-V 交织 / padding 能力，最后按 Qwen3.5 → GLM5 → GQA → MLA 用 gate parity 清理 `model_runner` 与 patch 的旧分支。对齐不等于在算子未支持前强制单 tensor。
+
+### 2026-07-17：Task 1 材料改为 Token / Tensor 粒度的分配对比叙事
+
+- 用户反馈原 HTML 的叙事更符合汇报目标；据此新增优化版交付：`docs/KV Cache分配对比_任务1_优化版.pptx` 与兼容副本 `docs/KV Cache分配对比_任务1_优化版.ppt`。两种格式均已通过 PowerPoint 打开校验，共 14 页。旧版 `KV Cache管理方式梳理与差异分析_Q3.*` 因被占用而未覆盖。
+- 视觉色系切换为用户提供的公司标准色：以公司红 `RGB(189,0,11)` 为主色，辅以洋红、橙、黄、绿、青及灰阶；K/Key=青、V/Value=红、latent/NoPE=洋红、K-RoPE=黄、Indexer K=橙、Scale=绿、Padding=灰，所有模型页共享该图例。
+- 材料重排为“符号图例 → Token → Block/Page → Per-layer Tensor → KV Pool”的固定阅读粒度。GQA、Dense MLA、SFA（GLM5.1）和 Hybrid 各自采用社区 vLLM / vLLM-Ascend 左右并排图：给出 token 字段、示意 shape、block/page 字节关系、物理 raw buffer / tensor 列表和算子连续性要求。
+- 新材料明确：GQA 的总 token 字节语义相同但 Ascend K/V 必须为两个连续 tensor；Dense MLA 从社区 `(N,B,576)` 的 `latent[0:512)+rope[512:576)` 变为 Ascend 的两个连续 tensor；SFA 以独立模型类别展示其 latent、RoPE、Indexer K、可选 Scale 与 3/4 tensor 变化；Hybrid 对比社区 `shared_by + as_strided` 与 Ascend 的分区、padding strip、K/V offset 管理。
+- 对齐结论保留并进一步具体化：先让 Layout 接口返回完整 `num_tensors`、dtype、shape、split sizes、alignment、reshape；Task 2 再逐项确认 stride、storage offset、overlay、K/V 交织和 page padding 的算子能力；Task 3 按 Qwen3.5 → GLM5/SFA → GQA → MLA 用 token parity、metadata 与性能不回归清理历史分支。
