@@ -625,6 +625,11 @@ vllm-ascend/
 - 更完整输出仍未保留集合前的异常首行，但集合覆盖 `model.embed_tokens`、attention、78 层 MoE experts、norm 以及 W4A8 的 `weight`/`weight_scale`/`weight_offset`/`scale_bias`，不是单个 shard 或几个可忽略权重缺失。当前本地 vLLM `vllm/model_executor/model_loader/default_loader.py` 的 `track_weights_loading()` 会以完全相同的集合格式抛出 `ValueError: Following weights were not initialized from checkpoint: {...}`，故该输出可高置信度归类为 strict weight-tracking 失败。
 - 它说明 `model.load_weights()` 没有把大量 GLM W4A8 checkpoint 参数标记为已加载；可能是 checkpoint/`quant_model_description.json` 不完整、`glm_moe_dsa` 的 ModelSlim mapper/量化格式与当前 vLLM-Ascend commit 不匹配，或量化自动识别未使 loader 进入应有的 quantized tracking 路径。不得直接关闭 `enable_weights_track` 作为正式正确性修复，因为会掩盖真实未加载权重；先只读检查 `quant_model_description.json`、`config.json` 中量化字段，并用日志 grep 抽取异常首行后再决定是否应显式传递 quantization 或修复 loader/mapping。
 
+### 2026-07-17：GLM-W4A8 checkpoint 完整性与显式量化结论
+
+- `/home/weight/GLM-5-w4a8/quant_model_description.json` 存在（17 MiB）、可解析且含 233925 个顶层条目；`quant_model_weights.safetensors.index.json` 含 233921 个 weight entries、100 个 shard，所有 index 引用的 shard 文件均存在。该证据显著降低了“目录不完整/缺 shard”的可能性，不能证明参数映射完全正确但足以停止重复下载或复制权重。
+- 同一 `config.json` 为 `model_type=glm_moe_dsa`、`architectures=GlmMoeDsaForCausalLM`，但 `quantization_config=None`、`quantization=None`。因此测试 harness 不能可靠地从 HF config 自动识别 W4A8；应显式以 `quantization="ascend"` 创建 vLLM `LLM`，使 ModelSlim quant config 走确定路径并避免把量化 checkpoint 用非量化 strict tracker 校验。当前 `tests/e2e/test_layout_correctness.py` 的 `LLM(...)` 没有传递 quantization，也没有 CLI 参数；本地 vLLM `LLM.__init__` 支持该参数。下一步为向 harness 增加默认 `None` 的 `--quantization` 参数并在 GLM gate=0/1 都传 `--quantization ascend`。该测试文件当前已有用户未提交的格式化改动，修改前需保持这些改动不被覆盖或误提交。
+
 ### 2026-07-17：会话记录约定确认
 
 - 已重新阅读并确认当前基线：layout-driven KV cache 重构已完成 GQA、Hybrid 和标准 MLA 的 gate=0/1 严格 metadata 与生成 token-ID 一致性验证；`GLM-5-w4a8` 是待执行真实 A/B 的 Sparse MLA 验证模型，后续仍需补齐其验证证据、无性能回归说明和 PR 整理。
