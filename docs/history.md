@@ -601,6 +601,10 @@ vllm-ascend/
 - k8s-node-48 当前镜像未安装 tmux（`tmux: command not found`），无需安装额外软件。改用 `nohup setsid bash -lc '<完整 A/B 脚本>' > launcher.log 2>&1 &`：外层先创建并 export 时间戳 `RUN_DIR`，内层仍固定 GLM-5-W4A8、TP=16、gate=1 后 gate=0、`set -euo pipefail` 和严格 comparator；保存 launcher PID 以及 phase3、gate1、gate0、comparison 独立日志。
 - `nohup` 忽略终端 HUP，`setsid` 脱离当前会话，因此可断开 VS Code/SSH 后以 `tail -F <RUN_DIR>/launcher.log` 和 `npu-smi info` 观察。它不能抵抗宿主机/调度器 SIGKILL；若后台 job 仍以 137 退出，必须保留日志并转向节点管理员排查外部终止，而不是重复 gate=0。
 
+### 2026-07-17：GLM Sparse MLA 验证的卡占用
+
+- 完整 GLM-5-W4A8 真实生成 A/B 配置显式设置了 16 个 `ASCEND_RT_VISIBLE_DEVICES`（Phy-ID 0--15）且 `--tensor-parallel-size 16`，因此 gate=1 阶段独占 16 张卡、结束释放后 gate=0 阶段再独占同样 16 张卡；两阶段顺序运行，不会同时启动两组 16 卡作业。前置 `tests/test_phase3_layout_dispatch.py` 是 Python 单元测试，不会按该 TP 配置加载 392G 模型或长期占用 NPU。
+
 ### 2026-07-17：会话记录约定确认
 
 - 已重新阅读并确认当前基线：layout-driven KV cache 重构已完成 GQA、Hybrid 和标准 MLA 的 gate=0/1 严格 metadata 与生成 token-ID 一致性验证；`GLM-5-w4a8` 是待执行真实 A/B 的 Sparse MLA 验证模型，后续仍需补齐其验证证据、无性能回归说明和 PR 整理。
