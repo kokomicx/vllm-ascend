@@ -559,3 +559,9 @@ vllm-ascend/
 
 - Windows VS Code Remote-SSH 日志显示已成功找到 `C:\\windows\\System32\\OpenSSH\\ssh.exe`（OpenSSH 9.5），但连接 `80.48.29.125` 时在 17 秒后明确报 `ssh: connect to host 80.48.29.125 port 22: Connection timed out`。因此失败发生在 TCP 网络连接层，尚未进入用户名/密码认证、远端 shell、Docker 或 VS Code Server 安装。
 - 日志中的前置 `spawn ... ssh.exe ENOENT` 是扩展逐个探测候选路径的正常噪声，最后找到 OpenSSH 后不构成故障；中文乱码的管道错误是 SSH 子进程超时退出后的次生错误。应从本机以 `Test-NetConnection 80.48.29.125 -Port 22` 验证网络，从目标机控制台检查 IP/路由、`sshd` 监听 22、宿主机防火墙/安全组/VPN/跳板策略；网络连通后再配置 Remote-SSH，不应先排查 VS Code Server。
+
+### 2026-07-17：导师沟通用阶段性进展简述
+
+- 工作目标：完成 vLLM-Ascend KV cache 管理的 layout-driven 重构，将 GQA、Hybrid、标准 MLA、Sparse MLA 等物理 cache 差异从 `model_runner_v1.py` 的复杂条件分支收敛为独立 `KVCacheLayout` 策略，并保留 feature gate 以支持安全回滚。
+- 已完成：补充 layout-dispatch 单测及真实模型 token-ID snapshot 比对工具；在 Ascend NPU 上完成 Qwen3-30B-A3B（GQA，48 层）、Qwen3.5-2B（Hybrid，24 层）和 DeepSeek-V2-Lite-W8A8（标准 MLA，27 层）的 gate=0/1 严格 metadata 与生成 token ID 一致性验证，且 Python Phase 3 单测为 21 passed。
+- 当前：已定位 `/home/weight/GLM-5-w4a8`（392G、`glm_moe_dsa`、78 层、MLA latent + DSA indexer）作为最小可用 Sparse MLA 真实验证模型，正在准备 TP=16 的真实生成 A/B；之后整理完整验证证据、无性能回归说明和 PR 描述，提交 vLLM-Ascend 代码评审。
