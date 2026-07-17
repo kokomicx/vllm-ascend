@@ -655,6 +655,10 @@ vllm-ascend/
 - 发现 **P1 风险**：legacy 非 MLA reshape 调用 backend `get_kv_cache_shape(..., cache_dtype_str=self.cache_config.cache_dtype)`，而 v2 的 `SingleTensorLayout`/`SplitKVLayout` 未传该参数；默认 BF16 GQA 测试无法覆盖非默认 KV cache dtype 的 backend shape 差异。另，v2 按每个 `KVCacheTensor` 判断 hybrid，而 legacy 会在发现混合 Attention/Mamba 后维持全局单 buffer 语义；若同一 hybrid 模型存在未共享的纯 Attention tensor，父类 hybrid post-processing 可能对 v2 的 `(K,V)` tuple 调用 `.shape`。两项均需补 runner-level 最小单测。
 - Windows 本地环境未安装 `torch`，因此 `python -m pytest tests/test_phase3_layout_dispatch.py -q` 在 collection 阶段失败；服务器已验证同测试 `21 passed`。现有 `tests/test_kv_cache_layout.py` 覆盖各 Layout 类的 isolated reshape（含 CompressedMLALayout），但未覆盖 v2 allocation→reshape 选择，因此未发现上述 P0。
 
+### 2026-07-17：导师沟通材料
+
+- 已整理可从头到尾讲解的改动叙事：原 `model_runner_v1.py` 同时承担布局决策、物理分配、reshape 和绑定，模型/量化分支在 allocation 与 reshape 两处重复；本次以 `KVCacheLayout` 将“每层需要几个物理 buffer、怎样按字节拆分、怎样转成算子所需 view、是否需要 PD 对齐”收敛到策略类，由 Model Runner 保留配置读取、生命周期和绑定调度。说明中覆盖 GQA、标准 MLA、Sparse MLA/C8、compressed MLA、Mamba/hybrid 的映射，gate=0 安全回滚、单测/E2E token-ID 验证，以及当前 GLM loader 阻断与 compressed MLA P0 的透明风险说明。
+
 ### 2026-07-17：会话记录约定确认
 
 - 已重新阅读并确认当前基线：layout-driven KV cache 重构已完成 GQA、Hybrid 和标准 MLA 的 gate=0/1 严格 metadata 与生成 token-ID 一致性验证；`GLM-5-w4a8` 是待执行真实 A/B 的 Sparse MLA 验证模型，后续仍需补齐其验证证据、无性能回归说明和 PR 整理。
