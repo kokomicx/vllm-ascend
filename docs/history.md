@@ -549,3 +549,8 @@ vllm-ascend/
 
 - 在 k8s-node-48 先重新运行 `npu-smi info`，仅在 Phy-ID 0--15 确认均空闲且本作业获准独占时启动。固定 `MODEL=/home/weight/GLM-5-w4a8`、`ASCEND_RT_VISIBLE_DEVICES=0,1,...,15`、TP=16、`max-model-len=2048`、`gpu-memory-utilization=0.80`，并把 OMP/MKL/OpenBLAS/NUMEXPR 线程数设为 1、关闭 tokenizer 并行。
 - 先运行 Phase 3 单测；之后在可写的 `/tmp/kv_glm5_w4a8_sparse_tokens` 内执行两次真实生成：gate=1 先保存 `gate1_first.json/log`，gate=0 后保存 `gate0_second.json/log`。使用 `set -euo pipefail` 确保第一次启动失败时不继续，最终以 `compare_kv_cache_shapes.py --require-generated-token-ids` 同时严格检查所有层的 cache metadata 和 token ID；成功标准不是仅有模型启动或文本表面相同，而是 comparator 以 0 退出并报告 token IDs identical。
+
+### 2026-07-17：迁移 vLLM-Ascend Docker 运行环境到新服务器
+
+- 跨服务器迁移应区分 Docker image、container 的可写层和外部数据卷：先从当前运行容器 `docker commit` 出一个版本化镜像，再以 `docker save` 导出 tar、经 SSH/SCP 传输、在目标服务器 `docker load` 并用同样的 Ascend device、驱动相关挂载、工作目录和 `/mnt:/mnt` 重新 `docker run`。不要将模型权重目录 `/mnt` 打进 image；它通常体积大、更新频繁，应作为目标机已存在或单独同步的挂载目录。
+- 创建前必须验证两台服务器的宿主机 Ascend 驱动/CANN 与镜像中 torch-npu/vLLM-Ascend 版本兼容；`docker save/load` 不能迁移 NPU 驱动或宿主机内核模块。传输完成后以 `docker image inspect` 校验镜像 ID、以容器内 `npu-smi info`、Python import 和 Phase 3 单测验证。认证信息不得写入 shell 历史、命令文本、Git 或 history.md；用户曾在对话中明文提供目标机 root 密码，建议任务结束后轮换该凭据。
