@@ -643,6 +643,7 @@ vllm-ascend/
 ### 2026-07-17：GLM Sparse MLA 测试资源复核通过
 
 - 最新 `npu-smi info` 显示 Phy-ID 0--15 的 HBM 使用量均约 2921--3212 MiB / 65536 MiB，对应每个逻辑 NPU 仍有约 60.8 GiB 可用；已超过 TP=16、`--gpu-memory-utilization 0.80` 启动所需的约 49.02 GiB。进程表中的 16 个 PID 每个仅显示 64 MiB，不构成此前数十 GiB 的占用状态。可使用既定的 `--quantization ascend`、TP=16 gate=1/0 A/B 命令重新开始测试。
+- 已给出无需 `tmux` 的 `nohup + setsid` 完整测试流程：在独立时间戳目录保存单测、gate=1、gate=0 和最终比对日志；两次引擎启动均显式传 `--quantization ascend`、TP=16、`max-model-len=2048`、`gpu-memory-utilization=0.80`，并以 `--require-generated-token-ids` 作为最终严格正确性判定。
 
 ### 2026-07-17：会话记录约定确认
 
@@ -670,3 +671,30 @@ vllm-ascend/
 - 该表述中的 `opaque` 是 **对通用分配器 / model runner 而言不透明**，不是说数据不可读取：runner 只按 `page_size_bytes` 分配一段 raw storage，不需要逐项知道其中有 latent KV、RoPE、indexer 或 scale。
 - `packed page` 指同一 block/page 内的 token 字段按照 Backend 定义的固定顺序和 offset 连续打包；例如可概念化为 `[token0 的 latent | rope | indexer | scale][token1 的相同字段]...`。实际字段、dtype、padding 和 shape 必须以具体 Backend/算子契约为准。
 - “kernel 解码字段”指 Backend 将 raw storage 建立为对应的逻辑 cache tensor/view 后，attention 或 indexer 算子按其已知的 shape、dtype 和 offset 读取需要的字段；并非所有 kernel 都直接接收未 reshape 的 `int8` 原始字节数组。为避免误解，PPT 中宜改为“对 runner 不透明的打包页；Backend/算子按布局契约解释字段”。
+- 用户提出进一步简化为“vLLM：一个 tensor，kernel 解码字段”。该句用于口头概括可以理解，但 PPT 推荐采用更准确、覆盖面更广的表述：“vLLM：一个逻辑 KV Cache tensor，Backend/算子按既定 layout（shape / stride / offset）访问其中字段。”其中 GQA 主要按 K/V 维度索引，MLA 主要按末维 offset 切分；“按布局访问”比“kernel 解码”更能避免误解为所有算子都直接解析 raw int8 字节流。
+
+### 2026-07-17：SFA（GLM5.1）页文案改为单一问题主线
+
+- 用户反馈 SFA 页难以理解，已将其标题和左/右侧文案重写为“**SFA = 标准 MLA Cache + Indexer Cache（量化时 + Scale）**”。页面只回答三件事：SFA 多存什么、社区如何管理、为何 Ascend 需要拆成更多连续 tensor。
+- 新左侧文案不再使用不易理解的 “opaque packed page / kernel 解码字段”，改为“一个逻辑 KV Cache tensor，字段按 layout 打包”：对 runner 仍是一个逻辑 cache/page，Backend/算子按既定 shape、dtype、offset 访问字段；无需 runner 逐字段分配。
+- 新右侧文案将拆分原因直接落在算子契约：bf16 为 latent、RoPE、Indexer K 三 tensor；C8 额外有 Scale；Indexer 先用 Indexer K 做 Top-K，Sparse Attention 再读取候选 KV，因此每个字段需要作为连续算子输入。底部一句话总结社区逻辑布局与 Ascend host 预拆的差异。
+- 因原优化版文件持续被占用，本次交付为 `docs/KV Cache分配对比_任务1_优化版_v3.pptx` 和 `.ppt`；两种格式均已经 PowerPoint 成功打开验证（14 页）。
+
+### 2026-07-17：后续 PPT 协作方式
+
+- 用户明确要求：后续不要再直接修改、生成或覆盖 PPT 文件；仅提供可直接替换的文案内容、页面表达逻辑和修改建议。除非用户再次明确授权，否则不对 PPT 产物执行写入操作。
+
+### 2026-07-17：Task 1 PPT 重构交付（用户已明确授权修改）
+
+- 用户认为旧稿 `docs/KV Cache分配对比_任务1_优化版_v3.ppt` 的内容粒度和叙事主线不足，并明确授权直接润色、重构 PPT；原文件未覆盖。
+- 已新建 15 页交付版 `docs/KV Cache分配对比_任务1_重构版_v4.pptx`。叙事主线统一为：**Token 字段 → Page/Block 分配 → 每层逻辑/物理 Tensor → vLLM 与 Ascend 的管理职责差异 → 对齐与债务清理**。
+- 新版先单独解释社区 vLLM 的 `KVCacheSpec → KVCacheGroup/shared_by → page_size_bytes/num_blocks → raw storage + logical view` 管理管线，再解释 Ascend 为满足 NPU 算子连续输入而在 host 侧预拆 physical tensors 的路径；避免把“一个 page”“一个逻辑 tensor”“一个物理 tensor”混为一谈。
+- 每个模型都采用一致的字段条、token 重复形成 block/page、N 个 block 形成 tensor 的图形粒度：GQA（K/V）、标准 MLA（latent/NoPE + K-RoPE）、SFA bf16（latent + RoPE + Indexer K，3 tensors）、SFA FP8/C8（额外 Scale，强调 dtype/page bytes/tensor 数的组合变化）和 Hybrid（Mamba state + K/V + padding）。
+- 已通过 PowerPoint 导出预览逐页做视觉检查，并修正第 14 页标题溢出；生成文件可正常打开，共 15 页。
+
+### 2026-07-17：会话基线复核与持续记录约定
+
+- 已重新阅读 `history.md` 并确认当前主线：Layout-driven KV cache 重构仍由 `VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH` feature gate 保护；GQA、Hybrid 和标准 MLA 已完成 gate=0/1 的 metadata 与生成 token-ID 一致性验证。
+- 当前最高优先级验证缺口为 `GLM-5-W4A8` 的 Sparse MLA 真实 NPU A/B 验证。测试 harness 已支持显式 `--quantization ascend`，但此前重试受目标 16 个 NPU device 的 HBM 占用影响；资源可用后应以 TP=16、gate=1/0 顺序运行，并保留完整日志和 snapshot。
+- 后续工作还包括补齐其余 Layout 的验证证据、性能/内存无回归数据、CI 映射与格式检查、提交整理和 PR review；在验证充分且获得评审认可前，不删除旧路径或默认开启 gate。
+- 用户要求从本次对话起，持续将每次会话中的关键进展、代码变更、测试结果、结论和阻塞项追加至本文件；后续会话按此约定维护。
