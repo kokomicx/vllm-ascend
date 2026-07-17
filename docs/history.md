@@ -581,6 +581,11 @@ vllm-ascend/
 - 用户执行 GLM-5-W4A8 的 gate=1 TP=16 真实生成流程时，VS Code 报 `/bin/bash terminated with exit code: 137`。137 等于 128+SIGKILL(9)，说明 shell/容器被外部强制终止，而非 pytest、comparator 或 Python 的正常非零退出；因此本轮没有有效的 gate=1 snapshot，禁止继续运行 gate=0 或将其作为 Sparse MLA 结果。
 - 在 392G MoE 多 rank 权重加载阶段，优先排查宿主机或容器 cgroup OOM killer（CPU RAM/共享内存/页缓存峰值），其次排查资源调度器或管理员终止；NPU memory OOM 通常会有 worker traceback，不能仅由 137 定论。恢复环境后应立即收集 `dmesg -T`/`journalctl -k` OOM 记录、容器 `OOMKilled` 状态、cgroup memory limit/current 和 gate1 日志末尾，再决定是提高容器内存/调整挂载，还是以 TP=8 等配置重试。
 
+### 2026-07-17：SIGKILL 后的 GLM gate=1 残留 worker 取证
+
+- 11:01 的 `npu-smi` 显示 16 个进程（host PID 3488814--3488829）仍各占约 37.812--37.813 GiB HBM，但 AICore 全为 0；与 gate1 日志中 10:55 启动的 16 个 TP worker 时间、数量一致，极可能是本次 GLM 作业的残留 worker。日志确认 Gloo/HCCL 的 world-size=16 建连成功，随后开始加载 `/home/weight/GLM-5-w4a8`；checkpoint 391.11 GiB、可用 RAM 931.56 GiB，读取进度停在 41/100 shard（约 2 分钟）后不再推进。
+- 本次 `dmesg -T` 中未匹配到 OOM/killed-process 记录，`journalctl` 在当前环境不存在；这不足以完全排除 cgroup/外部 kill，但可确认失败点在模型权重加载中，尚未进入 KV cache allocation、layout dispatch、生成或 comparator。不要等待或重跑第二条 gate=0；先在 host PID namespace 用 `ps` 验证这 16 个 PID 的命令行和 cgroup，确认属于本次 `/home/weight/GLM-5-w4a8` 作业后，以正常 SIGTERM 清理残留 worker，待卡和进程均释放后再针对终端/容器外部终止原因调整运行方式。
+
 ### 2026-07-17：会话记录约定确认
 
 - 已重新阅读并确认当前基线：layout-driven KV cache 重构已完成 GQA、Hybrid 和标准 MLA 的 gate=0/1 严格 metadata 与生成 token-ID 一致性验证；`GLM-5-w4a8` 是待执行真实 A/B 的 Sparse MLA 验证模型，后续仍需补齐其验证证据、无性能回归说明和 PR 整理。
