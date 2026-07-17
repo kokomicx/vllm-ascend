@@ -646,6 +646,7 @@ vllm-ascend/
 - 已给出无需 `tmux` 的 `nohup + setsid` 完整测试流程：在独立时间戳目录保存单测、gate=1、gate=0 和最终比对日志；两次引擎启动均显式传 `--quantization ascend`、TP=16、`max-model-len=2048`、`gpu-memory-utilization=0.80`，并以 `--require-generated-token-ids` 作为最终严格正确性判定。
 - 首次按该流程执行时，后台 `nohup` 任务已结束于 gate=1 引擎初始化；终端尾部仅包含 vLLM 父进程的 `RuntimeError: Engine core initialization failed` 和 Ascend `ERR99999` 汇总信息，均非根因。gate=0 与最终 comparator 因 `set -e` 未执行。必须从同一 `RUN_DIR/gate1_first.log` 中定位该汇总信息之前的第一条具体 `Traceback` / `ValueError` / `RuntimeError` 后再决定修复方向。
 - 已从 `gate1_first.log` 定位根因：TP11 在 `vllm/model_executor/model_loader/weight_utils.py:safetensors_weights_iterator()` 的 `safe_open(..., framework="pt").get_tensor(name)` 读取阶段抛出 `ValueError: could not determine the shape of object type 'torch.storage.UntypedStorage'`。这发生于权重载入、KV cache 创建之前，故与 Layout gate=1 重构、显存容量和 Sparse MLA 算子无关；显式 `--quantization ascend` 已传入但不能修复 checkpoint tensor 反序列化。待通过单进程 safetensors 扫描定位具体 shard/tensor，并核对服务器的 `torch`、`torch_npu`、`safetensors` 版本与该 ModelSlim W4A8 checkpoint 的生成环境兼容性。
+- 单进程扫描已完成：服务器版本为 `torch 2.10.0+cpu`、`torch_npu 2.10.0`、`safetensors 0.8.0`，并且 `quant_model_weights-00001` 至 `00099` 与 `rot.safetensors` 共 100 个文件的所有 tensor 均可由当前 Python 直接 `safe_open(..., framework="pt").get_tensor()` 成功实体化。故模型文件完整、基础 safetensors/PyTorch 组合可用；问题进一步收敛至 vLLM/Ascend EngineCore worker 的加载上下文（多进程或 NPU 初始化后的状态），下一步用与 vLLM 完全相同的 `from safetensors.torch import safe_open` 加单 NPU context 最小复现。
 
 ### 2026-07-17：会话记录约定确认
 
