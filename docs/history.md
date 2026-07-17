@@ -591,6 +591,11 @@ vllm-ascend/
 - 当前环境是 cgroup v1，`memory.limit_in_bytes=9223372036854771712`（约 8 EiB、接近 signed 64-bit 最大值），表示未施加实际容器内存上限；`memory.usage_in_bytes=201385803776`，约 187.6 GiB。结合 gate1 日志在加载前报告可用 RAM 931.56 GiB、且 `dmesg` 未出现 OOM 证据，不能将 exit 137 归因于 Docker/cgroup 的内存 hard limit。
 - 当前更高概率是 VS Code Remote terminal 生命周期、SSH/容器会话或外部资源管理层对前台 shell 的 SIGKILL；仍需先通过 host `ps` 确认并清理本次遗留 worker。下一次长时间 GLM 启动应在确认资源释放后放入 `tmux`（或 `setsid`/`nohup`）会话，日志写入独立文件，避免仅因 VS Code 前台终端断开而失去父进程；但若 tmux 也被杀，再向节点管理员索取调度器/宿主机审计信息。
 
+### 2026-07-17：Sparse MLA GLM-5-W4A8 持久化 A/B 重试流程
+
+- 在确认上一轮 16 个残留 PID 均为本作业且已正常退出、并再次确认 0--15 全部 Phy-ID 可独占后，创建 `tmux new -s glm_sparse_ab` 会话，在会话内执行 gate=1 后 gate=0 的完整真实生成脚本。固定模型 `/home/weight/GLM-5-w4a8`、TP=16、`max-model-len=2048`、`gpu-memory-utilization=0.80`；每次日志和 JSON 写到带时间戳的 `/tmp/kv_glm5_w4a8_sparse_tokens_<timestamp>`，避免与中断的旧结果混淆。
+- 脚本先跑 `tests/test_phase3_layout_dispatch.py`，使用 `set -euo pipefail`，任一 gate 失败即停止；两份 JSON 生成后只以 `compare_kv_cache_shapes.py --require-generated-token-ids` 的成功输出作为通过依据。运行中可用 `Ctrl-b d` 脱离 tmux，之后 `tmux attach -t glm_sparse_ab` 恢复；断开 VS Code/SSH 不应杀死 tmux 会话，完成后先确认比较器成功再 `tmux kill-session -t glm_sparse_ab`。
+
 ### 2026-07-17：会话记录约定确认
 
 - 已重新阅读并确认当前基线：layout-driven KV cache 重构已完成 GQA、Hybrid 和标准 MLA 的 gate=0/1 严格 metadata 与生成 token-ID 一致性验证；`GLM-5-w4a8` 是待执行真实 A/B 的 Sparse MLA 验证模型，后续仍需补齐其验证证据、无性能回归说明和 PR 整理。
