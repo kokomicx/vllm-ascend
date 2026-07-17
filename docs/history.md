@@ -741,6 +741,12 @@ vllm-ascend/
 - 当前改造在**职责方向**上与 vLLM 一致：backend 定义 kernel cache 契约，Runner 执行 allocation/reshape/bind；但在**公共接口形态**上尚非上游现有标准。上游 V1 主要以 `KVCacheSpec`、`KVCacheConfig` 和 backend `get_kv_cache_shape` 组织，而未提供统一的 `KVCacheLayoutPlan` API。因此 PR 表述应为 Ascend backend 为满足连续多 tensor 输入而增加的适配层，不应声称已实现上游通用抽象。
 - 下一步应收紧实现：Plan 只描述 `num_tensors/split_sizes/alignment/reshape`，不包含全局预算或 block 生命周期；优先让它成为 Ascend backend mixin 的内部返回值，避免把该方法 monkey-patch 为通用 `AttentionBackend` 公共契约；shared-by 兼容性应尽量在 group/config 形成阶段验证，而不是让 Runner 成为新的策略决策点。后续若上游正式引入 layer-aware KV layout/metadata API，再映射或迁移到该接口。
 
+### 2026-07-17：重新评估后取消 Layout Plan 作为独立对象的方向
+
+- 用户提出 `KVCacheLayoutPlan` 有“额外新层”的问题；重新评估后认可该判断。虽然 Plan 修复了 allocate/reshape 两阶段选择不一致，但它使 Runner 缓存 `self._kv_cache_layout_plans`，并通过 monkey-patch 将新方法扩散到通用 `AttentionBackend`，对上游 V1 的现有 `KVCacheSpec / KVCacheConfig / backend get_kv_cache_shape` 形态不够克制。
+- 推荐的下一版不再引入或保存 Plan 对象，也不把 `KVCacheLayout` 作为新增架构层。直接在 Ascend backend（共享 mixin 可复用实现）上扩展已有 shape 接口为三个确定性操作：`get_kv_cache_split_sizes(spec, total_bytes, ...)`、`needs_kv_cache_alignment(spec, ...)`、`reshape_kv_cache(raw_tensors, spec, ...)`。Runner 仅按 backend 返回的 sizes 通用分配 raw buffer，再回调同一 backend reshape/bind；Layout 选择、head dimensions、dtype、overlay/stride 均只存在于 backend 方法内部。
+- 为进一步对齐 vLLM，模型固有字段（如 MLA latent rank、RoPE rank、Sparse/C8 标志）应尽可能在构造 Ascend `KVCacheSpec` 时携带；backend 根据 Spec 输出物理 layout，Runner 不再读取模型层或以 raw tensor 类型反推语义。Mamba backend 通过 Ascend 本地适配实现同一组已有风格的方法，而非为上游基类增加公共 Plan API。该方向待用户确认后再执行代码回退与重构，当前已推送的 Plan 实现暂不删除。
+
 - 已重新阅读 `history.md` 并确认当前主线：Layout-driven KV cache 重构仍由 `VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH` feature gate 保护；GQA、Hybrid 和标准 MLA 已完成 gate=0/1 的 metadata 与生成 token-ID 一致性验证。
 - 当前最高优先级验证缺口为 `GLM-5-W4A8` 的 Sparse MLA 真实 NPU A/B 验证。测试 harness 已支持显式 `--quantization ascend`，但此前重试受目标 16 个 NPU device 的 HBM 占用影响；资源可用后应以 TP=16、gate=1/0 顺序运行，并保留完整日志和 snapshot。
 - 后续工作还包括补齐其余 Layout 的验证证据、性能/内存无回归数据、CI 映射与格式检查、提交整理和 PR review；在验证充分且获得评审认可前，不删除旧路径或默认开启 gate。
