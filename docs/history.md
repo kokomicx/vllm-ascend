@@ -659,6 +659,11 @@ vllm-ascend/
 
 - 已整理可从头到尾讲解的改动叙事：原 `model_runner_v1.py` 同时承担布局决策、物理分配、reshape 和绑定，模型/量化分支在 allocation 与 reshape 两处重复；本次以 `KVCacheLayout` 将“每层需要几个物理 buffer、怎样按字节拆分、怎样转成算子所需 view、是否需要 PD 对齐”收敛到策略类，由 Model Runner 保留配置读取、生命周期和绑定调度。说明中覆盖 GQA、标准 MLA、Sparse MLA/C8、compressed MLA、Mamba/hybrid 的映射，gate=0 安全回滚、单测/E2E token-ID 验证，以及当前 GLM loader 阻断与 compressed MLA P0 的透明风险说明。
 
+### 2026-07-17：导师提出的 Backend 边界方向
+
+- 导师建议“layout 和 shape 应由 attention backend 定义，而非 Model Runner”。当前实现 **部分符合但尚未完全达到**：各 `KVCacheLayout.reshape()` 已调用 backend 的 `get_kv_cache_shape()`，而 Model Runner 不再直接拼大多数 shape；但 Layout 选择仍主要位于 patched `KVCacheSpec.get_kv_cache_layout()`，且 `model_runner_v1.py` 仍保留 hybrid/cache-only 单 tensor override、`_build_layout_kwargs()` 中的模型层维度读取和 raw tuple 推断。compressed MLA P0 正是 Runner 依据 raw container 覆盖 spec layout 的反例。
+- 下一轮架构应把 backend 提升为“layout plan”的唯一所有者：由 backend 基于 spec/quantization/transfer context 返回 layout 策略或不可变 plan（buffer 数、字节切分、dtype/shape/view、对齐需求），Model Runner 仅通用地执行 `plan.allocate` / `plan.reshape`、生命周期绑定和跨层共享；消除 `raw_is_tuple`、模型类型、`self.use_sparse` / `self.use_compress` 等 Runner 内布局判断。这比当前策略类抽离更贴近上游 backend contract，也能从根源避免 allocation/reshape 选择不一致。
+
 ### 2026-07-17：会话记录约定确认
 
 - 已重新阅读并确认当前基线：layout-driven KV cache 重构已完成 GQA、Hybrid 和标准 MLA 的 gate=0/1 严格 metadata 与生成 token-ID 一致性验证；`GLM-5-w4a8` 是待执行真实 A/B 的 Sparse MLA 验证模型，后续仍需补齐其验证证据、无性能回归说明和 PR 整理。
