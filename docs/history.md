@@ -596,6 +596,11 @@ vllm-ascend/
 - 在确认上一轮 16 个残留 PID 均为本作业且已正常退出、并再次确认 0--15 全部 Phy-ID 可独占后，创建 `tmux new -s glm_sparse_ab` 会话，在会话内执行 gate=1 后 gate=0 的完整真实生成脚本。固定模型 `/home/weight/GLM-5-w4a8`、TP=16、`max-model-len=2048`、`gpu-memory-utilization=0.80`；每次日志和 JSON 写到带时间戳的 `/tmp/kv_glm5_w4a8_sparse_tokens_<timestamp>`，避免与中断的旧结果混淆。
 - 脚本先跑 `tests/test_phase3_layout_dispatch.py`，使用 `set -euo pipefail`，任一 gate 失败即停止；两份 JSON 生成后只以 `compare_kv_cache_shapes.py --require-generated-token-ids` 的成功输出作为通过依据。运行中可用 `Ctrl-b d` 脱离 tmux，之后 `tmux attach -t glm_sparse_ab` 恢复；断开 VS Code/SSH 不应杀死 tmux 会话，完成后先确认比较器成功再 `tmux kill-session -t glm_sparse_ab`。
 
+### 2026-07-17：无 tmux 环境的 Sparse MLA 持久化执行方式
+
+- k8s-node-48 当前镜像未安装 tmux（`tmux: command not found`），无需安装额外软件。改用 `nohup setsid bash -lc '<完整 A/B 脚本>' > launcher.log 2>&1 &`：外层先创建并 export 时间戳 `RUN_DIR`，内层仍固定 GLM-5-W4A8、TP=16、gate=1 后 gate=0、`set -euo pipefail` 和严格 comparator；保存 launcher PID 以及 phase3、gate1、gate0、comparison 独立日志。
+- `nohup` 忽略终端 HUP，`setsid` 脱离当前会话，因此可断开 VS Code/SSH 后以 `tail -F <RUN_DIR>/launcher.log` 和 `npu-smi info` 观察。它不能抵抗宿主机/调度器 SIGKILL；若后台 job 仍以 137 退出，必须保留日志并转向节点管理员排查外部终止，而不是重复 gate=0。
+
 ### 2026-07-17：会话记录约定确认
 
 - 已重新阅读并确认当前基线：layout-driven KV cache 重构已完成 GQA、Hybrid 和标准 MLA 的 gate=0/1 严格 metadata 与生成 token-ID 一致性验证；`GLM-5-w4a8` 是待执行真实 A/B 的 Sparse MLA 验证模型，后续仍需补齐其验证证据、无性能回归说明和 PR 整理。
