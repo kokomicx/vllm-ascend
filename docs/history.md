@@ -640,6 +640,10 @@ vllm-ascend/
 - 新日志中的 `Qwen2VLImageProcessorFast` 弃用提示、`enforce_eager` 导致的 compilation/CUDAGraph disabled 提示以及单节点 Gloo loopback warning 都不是启动失败原因。真正首个异常位于 `vllm_ascend/worker/worker.py:_init_device()`：多个 TP worker 报 `Free memory on device (5.44/61.28 GiB)` 或 `(27.76/61.28 GiB) ... less than desired GPU memory utilization (0.8, 49.02 GiB)`。
 - 即本次 GLM 测试在 device init 阶段就因已有进程占用 HBM 而失败，尚未进入权重加载；无法据此判断 `--quantization ascend` 的 W4A8 修复是否生效，也没有任何 KV layout 结果。TP=16、0.80 配置要求每个可见 Phy-ID 启动时至少约 49.02 GiB 空闲，当前有卡仅余 5.44 GiB 或 27.76 GiB，必须等待/协调占用作业完全释放所有 16 个目标芯片后重试；不应仅把 gpu-memory-utilization 降到能绕过启动检查，因为 391 GiB GLM 权重和后续 Sparse cache 仍需要实质显存容量。
 
+### 2026-07-17：GLM Sparse MLA 测试资源复核通过
+
+- 最新 `npu-smi info` 显示 Phy-ID 0--15 的 HBM 使用量均约 2921--3212 MiB / 65536 MiB，对应每个逻辑 NPU 仍有约 60.8 GiB 可用；已超过 TP=16、`--gpu-memory-utilization 0.80` 启动所需的约 49.02 GiB。进程表中的 16 个 PID 每个仅显示 64 MiB，不构成此前数十 GiB 的占用状态。可使用既定的 `--quantization ascend`、TP=16 gate=1/0 A/B 命令重新开始测试。
+
 ### 2026-07-17：会话记录约定确认
 
 - 已重新阅读并确认当前基线：layout-driven KV cache 重构已完成 GQA、Hybrid 和标准 MLA 的 gate=0/1 严格 metadata 与生成 token-ID 一致性验证；`GLM-5-w4a8` 是待执行真实 A/B 的 Sparse MLA 验证模型，后续仍需补齐其验证证据、无性能回归说明和 PR 整理。
@@ -660,3 +664,9 @@ vllm-ascend/
 - 材料重排为“符号图例 → Token → Block/Page → Per-layer Tensor → KV Pool”的固定阅读粒度。GQA、Dense MLA、SFA（GLM5.1）和 Hybrid 各自采用社区 vLLM / vLLM-Ascend 左右并排图：给出 token 字段、示意 shape、block/page 字节关系、物理 raw buffer / tensor 列表和算子连续性要求。
 - 新材料明确：GQA 的总 token 字节语义相同但 Ascend K/V 必须为两个连续 tensor；Dense MLA 从社区 `(N,B,576)` 的 `latent[0:512)+rope[512:576)` 变为 Ascend 的两个连续 tensor；SFA 以独立模型类别展示其 latent、RoPE、Indexer K、可选 Scale 与 3/4 tensor 变化；Hybrid 对比社区 `shared_by + as_strided` 与 Ascend 的分区、padding strip、K/V offset 管理。
 - 对齐结论保留并进一步具体化：先让 Layout 接口返回完整 `num_tensors`、dtype、shape、split sizes、alignment、reshape；Task 2 再逐项确认 stride、storage offset、overlay、K/V 交织和 page padding 的算子能力；Task 3 按 Qwen3.5 → GLM5/SFA → GQA → MLA 用 token parity、metadata 与性能不回归清理历史分支。
+
+### 2026-07-17：PPT 术语澄清 —— “opaque packed page，kernel 解码字段”
+
+- 该表述中的 `opaque` 是 **对通用分配器 / model runner 而言不透明**，不是说数据不可读取：runner 只按 `page_size_bytes` 分配一段 raw storage，不需要逐项知道其中有 latent KV、RoPE、indexer 或 scale。
+- `packed page` 指同一 block/page 内的 token 字段按照 Backend 定义的固定顺序和 offset 连续打包；例如可概念化为 `[token0 的 latent | rope | indexer | scale][token1 的相同字段]...`。实际字段、dtype、padding 和 shape 必须以具体 Backend/算子契约为准。
+- “kernel 解码字段”指 Backend 将 raw storage 建立为对应的逻辑 cache tensor/view 后，attention 或 indexer 算子按其已知的 shape、dtype 和 offset 读取需要的字段；并非所有 kernel 都直接接收未 reshape 的 `int8` 原始字节数组。为避免误解，PPT 中宜改为“对 runner 不透明的打包页；Backend/算子按布局契约解释字段”。
