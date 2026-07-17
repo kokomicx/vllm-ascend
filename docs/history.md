@@ -571,3 +571,7 @@ vllm-ascend/
 - 原先聚集在 `vllm_ascend/worker/model_runner_v1.py` 的 KV cache allocate/reshape 条件树已在 gate=1 新路径中改为 layout dispatch：`_allocate_kv_cache_tensors_v2()` 负责按 layer/spec 选择策略、调用 `split_sizes()` 分配平坦 buffer，后续 reshape 路径调用 `reshape()`；runner 仍保留编排职责（获取 layer spec、共享 buffer、2MB 对齐、设备分配和开关/旧路径回退），不再承载每种物理 cache 的细节。
 - 新文件 `vllm_ascend/core/kv_cache_layout.py` 定义抽象基类 `KVCacheLayout`，其统一接口是 `num_tensors()`、`split_sizes()`、`reshape()` 和可选的 `needs_alignment()`；具体实现为 `SingleTensorLayout`、`SplitKVLayout`、`SparseMLALayout`、`SparseMLAC8Layout`、`CompressedMLALayout`、`MambaLayout`。每个类集中定义一种物理布局的 tensor 数、字节切分和 backend-compatible shape/view，避免模型/量化特例散落在 runner。
 - `vllm_ascend/envs.py` 新增默认关闭的 `VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH`；`tests/test_phase3_layout_dispatch.py` 覆盖 gate 和 dispatch，`tests/e2e/test_layout_correctness.py` 与 `tests/e2e/compare_kv_cache_shapes.py` 用真实 NPU snapshot 验证 gate=0/1 的 metadata 与 token ID 一致性。对外表述应强调这是保留旧路径的渐进迁移，而不是一次性删除旧实现。
+
+### 2026-07-17：面向同事的 KV Cache 重构简述
+
+- 对外简述：当前尝试将 `model_runner_v1.py` 中按模型类型堆叠的 KV cache 分配/reshape 分支，抽成 `kv_cache_layout.py` 中独立的 `KVCacheLayout` 策略；runner 只负责选择和调度 layout，layout 自己负责该模型 cache 的 buffer 切分与 reshape。这样后续增加 MLA、Sparse MLA、Mamba 等模型时，主要新增或调整 layout 而不是继续修改核心 runner，目标是降低维护和回归风险。
