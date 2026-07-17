@@ -575,3 +575,21 @@ vllm-ascend/
 ### 2026-07-17：面向同事的 KV Cache 重构简述
 
 - 对外简述：当前尝试将 `model_runner_v1.py` 中按模型类型堆叠的 KV cache 分配/reshape 分支，抽成 `kv_cache_layout.py` 中独立的 `KVCacheLayout` 策略；runner 只负责选择和调度 layout，layout 自己负责该模型 cache 的 buffer 切分与 reshape。这样后续增加 MLA、Sparse MLA、Mamba 等模型时，主要新增或调整 layout 而不是继续修改核心 runner，目标是降低维护和回归风险。
+
+### 2026-07-17：GLM-5-W4A8 TP=16 启动终端被 SIGKILL
+
+- 用户执行 GLM-5-W4A8 的 gate=1 TP=16 真实生成流程时，VS Code 报 `/bin/bash terminated with exit code: 137`。137 等于 128+SIGKILL(9)，说明 shell/容器被外部强制终止，而非 pytest、comparator 或 Python 的正常非零退出；因此本轮没有有效的 gate=1 snapshot，禁止继续运行 gate=0 或将其作为 Sparse MLA 结果。
+- 在 392G MoE 多 rank 权重加载阶段，优先排查宿主机或容器 cgroup OOM killer（CPU RAM/共享内存/页缓存峰值），其次排查资源调度器或管理员终止；NPU memory OOM 通常会有 worker traceback，不能仅由 137 定论。恢复环境后应立即收集 `dmesg -T`/`journalctl -k` OOM 记录、容器 `OOMKilled` 状态、cgroup memory limit/current 和 gate1 日志末尾，再决定是提高容器内存/调整挂载，还是以 TP=8 等配置重试。 
+
+### 2026-07-17：会话记录约定确认
+
+- 已重新阅读并确认当前基线：layout-driven KV cache 重构已完成 GQA、Hybrid 和标准 MLA 的 gate=0/1 严格 metadata 与生成 token-ID 一致性验证；`GLM-5-w4a8` 是待执行真实 A/B 的 Sparse MLA 验证模型，后续仍需补齐其验证证据、无性能回归说明和 PR 整理。
+- 用户要求从本次起将每次对话中的关键进展、代码变更、测试结果、结论及阻塞项持续追加至本文件；后续会话按此约定维护，避免遗漏工作上下文。
+
+### 2026-07-17：Task 1 汇报材料重构与 PowerPoint 交付
+
+- 已基于原始 HTML、`task.md` 与算子依赖清单，将材料重构为 16 页的 Task 1 汇报：`docs/KV Cache管理方式梳理与差异分析_Q3.pptx`，并导出兼容副本 `docs/KV Cache管理方式梳理与差异分析_Q3.ppt`。两种格式均已使用 PowerPoint 成功打开并确认包含 16 页。
+- 材料按导师问题重新组织：先系统化说明社区 vLLM 的分组（`shared_by`）、内部存储（raw buffer / logic view）和空间申请（`page_size_bytes` → `num_blocks`）；再展示 vLLM-Ascend 的连续 tensor 约束与四类模型的差异；最后输出接口、算子、历史债务三条对齐主线及 Task 1--3 时间闭环。
+- 新增统一的 Shape / 内部字段布局页：GQA（K/V）、Dense MLA（latent KV/K-RoPE）、SFA（latent KV/K-RoPE/indexer/可选 scale）和 Hybrid（Mamba state + Attention K/V + padding）统一在一页展示，并明确色块是字段语义而非强制 raw allocation 数量。
+- SFA（GLM5.1）已从“Sparce MLA”合并表述中独立出来：其与 Sparse MLA 共享部分存储模式，但拥有稀疏检索、indexer cache、量化 scale 和独立算子依赖，需在 Task 2 中单独确认与验证；材料避免把它误表述为完全同义的模型类别。
+- 已增加“与社区对齐”的可执行定义：先以 `KVCacheLayout` 让 Backend 显式表达多 tensor 的尺寸、dtype、切分与 reshape，随后逐算子确认 stride / storage offset / overlay / K-V 交织 / padding 能力，最后按 Qwen3.5 → GLM5 → GQA → MLA 用 gate parity 清理 `model_runner` 与 patch 的旧分支。对齐不等于在算子未支持前强制单 tensor。
