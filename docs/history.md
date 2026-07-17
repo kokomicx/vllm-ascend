@@ -648,6 +648,13 @@ vllm-ascend/
 - 已从 `gate1_first.log` 定位根因：TP11 在 `vllm/model_executor/model_loader/weight_utils.py:safetensors_weights_iterator()` 的 `safe_open(..., framework="pt").get_tensor(name)` 读取阶段抛出 `ValueError: could not determine the shape of object type 'torch.storage.UntypedStorage'`。这发生于权重载入、KV cache 创建之前，故与 Layout gate=1 重构、显存容量和 Sparse MLA 算子无关；显式 `--quantization ascend` 已传入但不能修复 checkpoint tensor 反序列化。待通过单进程 safetensors 扫描定位具体 shard/tensor，并核对服务器的 `torch`、`torch_npu`、`safetensors` 版本与该 ModelSlim W4A8 checkpoint 的生成环境兼容性。
 - 单进程扫描已完成：服务器版本为 `torch 2.10.0+cpu`、`torch_npu 2.10.0`、`safetensors 0.8.0`，并且 `quant_model_weights-00001` 至 `00099` 与 `rot.safetensors` 共 100 个文件的所有 tensor 均可由当前 Python 直接 `safe_open(..., framework="pt").get_tensor()` 成功实体化。故模型文件完整、基础 safetensors/PyTorch 组合可用；问题进一步收敛至 vLLM/Ascend EngineCore worker 的加载上下文（多进程或 NPU 初始化后的状态），下一步用与 vLLM 完全相同的 `from safetensors.torch import safe_open` 加单 NPU context 最小复现。
 
+### 2026-07-17：Layout dispatch 静态代码审计
+
+- Sparse MLA（非 C8）路径的 `SparseMLALayout.split_sizes()` 与 `reshape()` 分别沿用 `spec.sparse_kv_cache_ratio` 和 `spec.sparse_head_dim=(kv_lora, rope, indexer)`；同旧路径的分配比例、dtype 和目标 shape 一致。GLM 当前异常位于模型权重读取阶段，早于 KV cache 分配，不能归因于 Sparse MLA Layout。
+- 发现 **P0**：`NPUModelRunner._reshape_kv_cache_tensors_v2()` 以 `AttentionSpec and not raw_is_tuple` 强制选择 `SingleTensorLayout`，但 `CompressedMLALayout` 按设计恰好分配一个 raw tensor。这样 gate=1 的 DeepSeek V4 compressed MLA 会丢失 `CompressedMLALayout.reshape()` 的 scale/overlay `as_strided` 视图，输出类型/shape 与旧路径不等价，甚至可能因 raw buffer 比主 K view 更大而 `.view()` 失败。应优先保留 `spec.get_kv_cache_layout()` 返回的 `CompressedMLALayout`，只对真正 hybrid/cache-only 的单 tensor attention 强制 `SingleTensorLayout`。
+- 发现 **P1 风险**：legacy 非 MLA reshape 调用 backend `get_kv_cache_shape(..., cache_dtype_str=self.cache_config.cache_dtype)`，而 v2 的 `SingleTensorLayout`/`SplitKVLayout` 未传该参数；默认 BF16 GQA 测试无法覆盖非默认 KV cache dtype 的 backend shape 差异。另，v2 按每个 `KVCacheTensor` 判断 hybrid，而 legacy 会在发现混合 Attention/Mamba 后维持全局单 buffer 语义；若同一 hybrid 模型存在未共享的纯 Attention tensor，父类 hybrid post-processing 可能对 v2 的 `(K,V)` tuple 调用 `.shape`。两项均需补 runner-level 最小单测。
+- Windows 本地环境未安装 `torch`，因此 `python -m pytest tests/test_phase3_layout_dispatch.py -q` 在 collection 阶段失败；服务器已验证同测试 `21 passed`。现有 `tests/test_kv_cache_layout.py` 覆盖各 Layout 类的 isolated reshape（含 CompressedMLALayout），但未覆盖 v2 allocation→reshape 选择，因此未发现上述 P0。
+
 ### 2026-07-17：会话记录约定确认
 
 - 已重新阅读并确认当前基线：layout-driven KV cache 重构已完成 GQA、Hybrid 和标准 MLA 的 gate=0/1 严格 metadata 与生成 token-ID 一致性验证；`GLM-5-w4a8` 是待执行真实 A/B 的 Sparse MLA 验证模型，后续仍需补齐其验证证据、无性能回归说明和 PR 整理。
