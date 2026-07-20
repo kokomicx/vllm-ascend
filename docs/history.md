@@ -809,3 +809,9 @@ vllm-ascend/
 - 导师指出“每一种物理布局一个 Layout 类”若机械执行会造成新的代码膨胀，只是将 `ModelRunner` 条件树迁移到多个类。后续设计口径调整为“少量可复用的布局原语，不按模型一一建类”：GQA 与标准 MLA 已可复用 `SplitKVLayout`；仅尺寸、dtype 等参数差异应通过 `KVCacheSpec`/backend shape/配置字段表达，不新增类。
 - 首个 GQA PR 只验证 `SplitKVLayout` 是否能让 Runner 通用流程更清晰。Sparse MLA、C8、Compressed MLA、Mamba 等只有在物理 tensor 数、独立 allocation、storage overlay 或多 state carving 等关系无法由既有原语和参数表达时，才评估新增专用实现；是否继续保留多个类或改为更通用的字段描述/组合机制，应在 TMG 评审后决定。
 - 对导师回复应直接认可该风险，不为当前已有的多 Layout 类辩护；承诺先收敛 GQA 样例和代码规模，再用评审结果决定后续抽象，而非预先承诺“所有布局都要加类”。
+
+### 2026-07-20：用具体例子解释 Layout 类膨胀问题
+
+- 导师担心的不是“类”这一语法形式，而是无收益的搬家：若原来的 `if GQA / elif MLA / elif Sparse / ...` 被逐字改写成 `GQALayout / MLALayout / SparseLayout / ...`，总代码和理解路径都会增加，`ModelRunner` 只是变短而系统没有更简单。
+- 应按可复用的 storage pattern 判断：GQA 的 K/V 与标准 MLA 的 latent/NoPE、K-RoPE 都是“两段独立连续 tensor”，尺寸/语义差异可通过 spec 参数表达，优先共用 `SplitKVLayout`；普通 Sparse MLA 的三段、C8 Sparse MLA 的四段理论上可进一步研究能否用一个通用“字段列表/多 tensor”机制表达，而非先固定为两个模型类；Compressed MLA 的同一 storage overlay 和 Mamba 的异构多 state view 是存储关系本质不同的候选特殊实现。
+- GQA-first 的真正问题是验证 `SplitKVLayout` 这一个抽象是否既减少 Runner 分支、又能复用于标准 MLA；若不能显著减少重复或只服务单一模型，应改为更小的 helper/参数化接口，而不是继续扩展 Layout 类体系。
