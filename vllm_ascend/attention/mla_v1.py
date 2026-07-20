@@ -21,7 +21,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.attention.kv_cache_layout import AscendKVCacheLayoutBackendMixin
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata, CPChunkedContextMetadata
@@ -75,7 +74,7 @@ BUILD_METADATA_STEP_DECODE = 1
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
 
 
-class AscendMLABackend(AscendKVCacheLayoutBackendMixin, AttentionBackend):
+class AscendMLABackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod

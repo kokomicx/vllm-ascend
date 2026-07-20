@@ -77,7 +77,6 @@ from vllm.v1.outputs import (
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
-
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 
 if not vllm_version_is("0.20.2"):
@@ -98,7 +97,11 @@ from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     maybe_create_ubatch_slices,
 )
-from vllm.v1.worker.utils import AttentionGroup, prepare_kernel_block_sizes
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    prepare_kernel_block_sizes
+)
+
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
@@ -116,11 +119,6 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
-from vllm_ascend.core.kv_cache_layout import (
-    KVCacheLayoutPlan,
-    adjust_kv_layout,
-)
-from vllm_ascend.envs import VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -128,6 +126,13 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
+from vllm_ascend.core.kv_cache_layout import (
+    KVCacheLayout,
+    MambaLayout,
+    SingleTensorLayout,
+    adjust_kv_layout,
+)
+from vllm_ascend.envs import VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
@@ -3601,70 +3606,78 @@ class NPUModelRunner(GPUModelRunner):
         offset = (aligned_addr - data_ptr) // buf.element_size()
         return buf[int(offset):][:size]
 
-    def _get_layer_attention_backends(self) -> dict[str, type[AttentionBackend]]:
-        """Return the backend that owns each layer's KV cache contract.
+    def _build_layout_kwargs(
+        self,
+        layer_name: str,
+        spec: AttentionSpec,
+    ) -> dict[str, Any]:
+        """Build kwargs consumed by KVCacheLayout.split_sizes / reshape.
 
-        Layout selection and shape policy remain in the backend.
+        Only needed for SplitKVLayout — other layouts ignore these kwargs.
         """
-        layer_backends: dict[str, type[AttentionBackend]] = {}
-        for group in self._kv_cache_spec_attn_group_iterator():
-            for group_layer_name in group.layer_names:
-                layer_backends[group_layer_name] = group.backend
-        return layer_backends
+        k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, spec)
+        kwargs: dict[str, Any] = {
+            "head_dims": (k_dim, v_dim),
+            "layer_name": layer_name,
+        }
+        if enable_fa_quant(self.vllm_config):
+            kwargs["quant_config"] = self.vllm_config.quant_config
+        return kwargs
 
     def _allocate_kv_cache_tensors_v2(
         self, kv_cache_config: KVCacheConfig,
     ) -> dict[str, torch.Tensor | tuple[torch.Tensor, ...]]:
         """Layout-driven KV cache tensor allocation.
 
-        The selected backend returns a ``KVCacheLayoutPlan`` for every layer.
-        This method only materialises the plan's physical byte allocations.
+        For each ``KVCacheTensor`` (layers sharing one physical buffer):
+        1. Detect hybrid (Mamba + Attention) → force SingleTensorLayout
+        2. Pure Mamba → MambaLayout
+        3. Pure Attention → ``spec.get_kv_cache_layout()``
+        4. Call ``layout.split_sizes()`` and allocate flat int8 buffers
         """
         ALIGNMENT = 2 * 1024 * 1024
         need_align = self.vllm_config.kv_transfer_config is not None
         layer_specs = self._get_layer_kv_cache_specs(kv_cache_config)
-        layer_backends = self._get_layer_attention_backends()
-        is_hybrid_model = (
-            any(isinstance(spec, MambaSpec) for spec in layer_specs.values())
-            and any(isinstance(spec, AttentionSpec) for spec in layer_specs.values())
-        )
-        kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, ...]] = {}
-        self._kv_cache_layout_plans: dict[str, KVCacheLayoutPlan] = {}
+        kv_cache_raw_tensors: dict = {}
 
         for tensor_spec in kv_cache_config.kv_cache_tensors:
-            plans = {
-                layer_name: layer_backends[layer_name].get_kv_cache_layout_plan(
-                    layer_specs[layer_name],
-                    layer_name=layer_name,
-                    vllm_config=self.vllm_config,
-                    is_hybrid_model=is_hybrid_model,
+            specs = [layer_specs[n] for n in tensor_spec.shared_by]
+            has_mamba = any(isinstance(s, MambaSpec) for s in specs)
+            has_attn = any(isinstance(s, AttentionSpec) for s in specs)
+            is_cache_only = any("cache_only_layers" in n for n in tensor_spec.shared_by)
+
+            if has_mamba and has_attn:
+                # Hybrid attn+mamba sharing the same buffer
+                layout: KVCacheLayout = SingleTensorLayout()
+                spec_for_split = specs[0]
+                split_kwargs: dict[str, Any] = {}
+            elif has_mamba and not has_attn:
+                # Pure Mamba / linear-attention
+                layout = MambaLayout()
+                spec_for_split = specs[0]
+                split_kwargs = {}
+            elif is_cache_only:
+                # cache_only_layers store hidden states (no K/V split)
+                layout = SingleTensorLayout()
+                spec_for_split = specs[0]
+                split_kwargs = {}
+            else:
+                # Pure attention — dispatch via Layout
+                first_attn = next(
+                    n for n in tensor_spec.shared_by
+                    if isinstance(layer_specs[n], AttentionSpec)
                 )
-                for layer_name in tensor_spec.shared_by
-            }
-            allocation_plan = next(iter(plans.values()))
-            sizes = allocation_plan.split_sizes(tensor_spec.size)
-            assert len(sizes) == allocation_plan.num_tensors, (
-                f"{allocation_plan.layout.__class__.__name__}.split_sizes returned "
-                f"{len(sizes)} sizes but num_tensors="
-                f"{allocation_plan.num_tensors}"
+                spec_for_split = layer_specs[first_attn]
+                layout = spec_for_split.get_kv_cache_layout()
+                split_kwargs = self._build_layout_kwargs(first_attn, spec_for_split)
+
+            sizes = layout.split_sizes(tensor_spec.size, spec_for_split, **split_kwargs)
+            assert len(sizes) == layout.num_tensors(), (
+                f"{layout.__class__.__name__}.split_sizes returned {len(sizes)} "
+                f"sizes but num_tensors={layout.num_tensors()}"
             )
 
-            # Shared layers must agree on their physical allocation contract.
-            for layer_name, plan in plans.items():
-                assert plan.num_tensors == allocation_plan.num_tensors, (
-                    f"Shared KV cache layers disagree on tensor count: "
-                    f"{tensor_spec.shared_by}; {layer_name} requested "
-                    f"{plan.num_tensors}, allocation plan requested "
-                    f"{allocation_plan.num_tensors}."
-                )
-                assert plan.split_sizes(tensor_spec.size) == sizes, (
-                    f"Shared KV cache layers disagree on split sizes: "
-                    f"{tensor_spec.shared_by}; {layer_name} requested "
-                    f"{plan.split_sizes(tensor_spec.size)}, allocation plan "
-                    f"requested {sizes}."
-                )
-
-            if need_align and allocation_plan.needs_alignment:
+            if need_align and layout.needs_alignment():
                 tensors = [
                     self._alloc_aligned(sz, ALIGNMENT, self.device) for sz in sizes
                 ]
@@ -3675,13 +3688,10 @@ class NPUModelRunner(GPUModelRunner):
                 ]
 
             value: torch.Tensor | tuple = (
-                tensors[0]
-                if allocation_plan.num_tensors == 1
-                else tuple(tensors)
+                tensors[0] if layout.num_tensors() == 1 else tuple(tensors)
             )
             for name in tensor_spec.shared_by:
                 kv_cache_raw_tensors[name] = value
-                self._kv_cache_layout_plans[name] = plans[name]
 
         # Validate every layer got initialized
         expected: set[str] = set()
@@ -3711,6 +3721,7 @@ class NPUModelRunner(GPUModelRunner):
         has_attn, has_mamba = False, False
 
         for group in self._kv_cache_spec_attn_group_iterator():
+            backend = group.backend
             spec = group.kv_cache_spec
             if group.kv_cache_group_id == len(kernel_block_sizes):
                 continue
@@ -3721,14 +3732,25 @@ class NPUModelRunner(GPUModelRunner):
                     continue
 
                 raw = kv_cache_raw_tensors[layer_name]
-                plan = self._kv_cache_layout_plans[layer_name]
-                raw_list: list[torch.Tensor] = list(raw) if isinstance(raw, tuple) else [raw]
-                assert len(raw_list) == plan.num_tensors, (
-                    f"{layer_name}: allocated {len(raw_list)} raw tensors but "
-                    f"backend plan requires {plan.num_tensors}."
+
+                # Normalize raw data to list[torch.Tensor]
+                raw_is_tuple = isinstance(raw, tuple)
+                raw_list: list[torch.Tensor] = (
+                    list(raw) if raw_is_tuple else [raw]
                 )
+
+                # Detect allocation-reshape layout mismatch for hybrid
+                # mamba+attention models.  When attention and mamba layers
+                # share the same physical buffer, allocation uses
+                # SingleTensorLayout (one flat buffer), but
+                # spec.get_kv_cache_layout() would return SplitKVLayout.
+                # Match the layout to the actual tensor format.
+                if isinstance(spec, AttentionSpec) and not raw_is_tuple:
+                    layout: KVCacheLayout = SingleTensorLayout()
+                else:
+                    layout = spec.get_kv_cache_layout()
                 total_raw_bytes = sum(t.numel() for t in raw_list)
-                num_blocks = total_raw_bytes // plan.spec.page_size_bytes
+                num_blocks = total_raw_bytes // spec.page_size_bytes
 
                 if isinstance(spec, AttentionSpec):
                     has_attn = True
@@ -3738,11 +3760,21 @@ class NPUModelRunner(GPUModelRunner):
                     has_mamba = True
                     kernel_num_blocks = num_blocks
 
-                result = plan.reshape(
+                kwargs = (
+                    self._build_layout_kwargs(layer_name, spec)
+                    if isinstance(spec, AttentionSpec)
+                    else {}
+                )
+
+                result = layout.reshape(
                     raw_list,
+                    spec,
                     num_blocks=num_blocks,
                     kernel_num_blocks=kernel_num_blocks,
                     kernel_block_size=kernel_block_size,
+                    backend=backend,
+                    vllm_config=self.vllm_config,
+                    **kwargs,
                 )
                 kv_caches[layer_name] = result
 
@@ -4673,7 +4705,7 @@ class NPUModelRunner(GPUModelRunner):
                 # or enable more requests to be processed simultaneously.
                 self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
                 continue
-            elif self.use_compress or isinstance(attn_module, (Attention, MambaBase)):
+            elif self.use_compress or isinstance(attn_module, Attention) or isinstance(attn_module, MambaBase):
                 # Skip modules that don't need KV cache (eg encoder-only attention)
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
