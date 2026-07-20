@@ -65,6 +65,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -108,6 +109,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAtt
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
+from vllm_ascend.attention.kv_cache_layout import SplitKVLayout
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -4013,6 +4015,34 @@ class NPUModelRunner(GPUModelRunner):
         head_size_v = kv_cache_spec.head_size_v if hasattr(kv_cache_spec, "head_size_v") else kv_cache_spec.head_size
         return kv_cache_spec.head_size, head_size_v
 
+    def _get_gqa_kv_cache_layout(
+        self,
+        layer_name: str,
+        kv_cache_spec: FullAttentionSpec,
+    ) -> SplitKVLayout:
+        """Build the two-field layout used by the GQA full-attention backend."""
+        key_dim, value_dim = self._get_attention_kv_cache_dims(layer_name, kv_cache_spec)
+        assert key_dim > 0 and value_dim > 0
+        key_dtype = value_dtype = kv_cache_spec.dtype
+        head_dims = [key_dim, value_dim]
+        if enable_fa_quant(self.vllm_config):
+            key_split_factor, value_split_factor = self.vllm_config.quant_config.get_kv_quant_split_factor(
+                layer_name, head_dims
+            )
+            key_dtype, value_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
+                layer_name, kv_cache_spec.dtype, self.model_config
+            )
+        else:
+            key_split_factor, value_split_factor = calc_split_factor(head_dims)
+        return SplitKVLayout(
+            key_dim=key_dim,
+            value_dim=value_dim,
+            key_dtype=key_dtype,
+            value_dtype=value_dtype,
+            key_split_factor=key_split_factor,
+            value_split_factor=value_split_factor,
+        )
+
     @staticmethod
     def _align_up(value: int, alignment: int) -> int:
         return (value + alignment - 1) // alignment * alignment
@@ -4198,6 +4228,22 @@ class NPUModelRunner(GPUModelRunner):
                         )
                         raw_cache = (k_tensor,)
 
+                    for layer_name_inner in kv_cache_tensor.shared_by:
+                        kv_cache_raw_tensors[layer_name_inner] = raw_cache
+                elif (
+                    isinstance(layer_kv_cache_spec[layer_name], FullAttentionSpec)
+                    and layer_name not in kv_cache_raw_tensors
+                    and not use_mamba
+                ):
+                    layout = self._get_gqa_kv_cache_layout(
+                        layer_name,
+                        layer_kv_cache_spec[layer_name],
+                    )
+                    key_tensor_size, value_tensor_size = layout.raw_tensor_sizes(kv_cache_tensor.size)
+                    raw_cache = (
+                        self._allocate_int8_cache_tensor(key_tensor_size, alignment),
+                        self._allocate_int8_cache_tensor(value_tensor_size, alignment),
+                    )
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         kv_cache_raw_tensors[layer_name_inner] = raw_cache
                 elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors and not use_mamba:
@@ -4424,6 +4470,29 @@ class NPUModelRunner(GPUModelRunner):
                     current_sparse_c8 = self.use_sparse and kv_cache_spec_uses_sparse_c8(
                         current_kv_cache_spec
                     )
+                    if (
+                        isinstance(current_kv_cache_spec, FullAttentionSpec)
+                        and not self.use_sparse
+                        and not self.use_hybrid_blocks
+                    ):
+                        raw_key_tensor, raw_value_tensor = kv_cache_raw_tensors[layer_name]  # type: ignore[misc]
+                        num_blocks = (
+                            raw_key_tensor.numel() + raw_value_tensor.numel()
+                        ) // current_kv_cache_spec.page_size_bytes
+                        assert num_blocks >= kv_cache_config.num_blocks
+                        kv_cache_shape = attn_backend.get_kv_cache_shape(
+                            num_blocks,
+                            current_kv_cache_spec.block_size,
+                            current_kv_cache_spec.num_kv_heads,
+                            current_kv_cache_spec.head_size,
+                        )
+                        layout = self._get_gqa_kv_cache_layout(layer_name, current_kv_cache_spec)
+                        kv_caches[layer_name] = layout.reshape(
+                            raw_key_tensor,
+                            raw_value_tensor,
+                            kv_cache_shape,
+                        )
+                        continue
                     if self.use_sparse and "cache_only_layers" not in layer_name:
                         raw_cache = kv_cache_raw_tensors[layer_name]
                         assert isinstance(raw_cache, tuple)
