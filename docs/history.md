@@ -803,3 +803,9 @@ vllm-ascend/
 
 - “通用 fallback”不是模型类别，指 `KVCacheSpec` 没有专用 Ascend `get_kv_cache_layout()` 映射时使用的默认/兜底布局。当前 `_kvcachespec_get_kv_cache_layout()` 为未单独 patch 的 spec（代码注释举例 `ChunkedLocalAttentionSpec`、`EncoderOnlyAttentionSpec`、`CrossAttentionSpec`）返回 `SingleTensorLayout`，避免初始化因缺少 Layout 选择而直接失败。
 - 面向导师的材料应使用“默认兜底布局（未配置专用 Layout 的 CacheSpec）”替代英文 “通用 fallback”，并说明它不等价于已完成所有未知模型的正确性适配；新增模型仍应根据实际算子接口提供专用 Layout 和验证。
+
+### 2026-07-20：Layout 类数量膨胀风险与收敛原则
+
+- 导师指出“每一种物理布局一个 Layout 类”若机械执行会造成新的代码膨胀，只是将 `ModelRunner` 条件树迁移到多个类。后续设计口径调整为“少量可复用的布局原语，不按模型一一建类”：GQA 与标准 MLA 已可复用 `SplitKVLayout`；仅尺寸、dtype 等参数差异应通过 `KVCacheSpec`/backend shape/配置字段表达，不新增类。
+- 首个 GQA PR 只验证 `SplitKVLayout` 是否能让 Runner 通用流程更清晰。Sparse MLA、C8、Compressed MLA、Mamba 等只有在物理 tensor 数、独立 allocation、storage overlay 或多 state carving 等关系无法由既有原语和参数表达时，才评估新增专用实现；是否继续保留多个类或改为更通用的字段描述/组合机制，应在 TMG 评审后决定。
+- 对导师回复应直接认可该风险，不为当前已有的多 Layout 类辩护；承诺先收敛 GQA 样例和代码规模，再用评审结果决定后续抽象，而非预先承诺“所有布局都要加类”。
