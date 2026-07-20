@@ -821,3 +821,8 @@ vllm-ascend/
 - 结论：严格定义为“两个独立连续 tensor”的最小 `SplitKVLayout` **不能同时服务所有当前 KV cache 模型**，但可服务 GQA 与标准 MLA。两者都可由两个独立字段及 spec 提供的维度/dtype 解释；当前通用 attention 实现也以 `kv_cache[0]`、`kv_cache[1]` 作为 K/V 输入。
 - 不能强行覆盖的代码级原因：普通 Sparse MLA 的算子契约需要 3 个独立 cache（latent、RoPE、Indexer K），C8 Sparse MLA 需要第 4 个不同 dtype 的 per-token scale；将这些字段塞进两个 tensor 会改变 DSA/Indexer 算子接收的独立 tensor/dtype 契约，而不是单纯重构。Compressed MLA 要从同一 raw storage 建立 scale/overlay view；Mamba 根据 `MambaSpec.shapes`/`dtypes` 切多个异构 state view；Hybrid 还需要 Runner 协调共享与后处理，均不是二 tensor split 可表达的关系。
 - 不建议为追求“一个 Layout 覆盖全部”而把 `SplitKVLayout` 扩展成任意字段、任意 overlay、任意 state 的万能类：这样它已不再是最小 SplitKV，且会重新形成复杂条件树。首个 GQA PR 应仅实现/验证可复用的二字段 split；Sparse/C8 可在后续评估抽成一个参数化 N-field helper，Compressed/Mamba 保持独立候选处理。TMG 评审后再决定是否引入该通用 helper，避免预先扩大抽象。
+
+### 2026-07-20：创建干净的 GQA PR 独立工作区
+
+- 为避免当前 `feature/layout-refactor-phase3` 上的历史实验、文档记录和用户未提交草稿进入后续代码 PR，保留原工作区不动，并从最新官方 `origin/main` 的 `585d76c7`（2026-07-20）创建独立 Git worktree：`C:/Users/c50058674/code/vllm-ascend-gqa-pr`。
+- 新分支为 `feature/gqa-kv-layout-pr`，创建后 `git status --short` 为空；它不包含当前 feature 分支的 Layout 实验提交、history 文档提交或任何未提交的本地文件。后续 GQA 最小样例代码、测试和 PR 整理只在该目录/分支进行，当前 `C:/Users/c50058674/code/vllm-ascend` 继续保留为历史分析与材料工作区。
