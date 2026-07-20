@@ -798,3 +798,8 @@ vllm-ascend/
 - 用户草稿的背景、目标、Layout 抽取和 gate=0/1 正确性验证主线可用；但布局表必须修正为：`SingleTensorLayout` 对应 draft-model hidden-state cache（`cache_only_layers`）、通用 fallback 或 Hybrid 共享 raw-buffer 兼容分配，纯 Mamba/linear-attention 对应 `MambaLayout`；C8 应写为 Sparse MLA 的 `cache_sparse_c8` indexer-key int8 量化加 per-token fp16 scale，而不是“C8 等场景”。Attention backend 只为 attention cache 提供最终 shape，Mamba state 的 shape/dtype 来源于 `MambaSpec`。
 - 计划不应在 7/24 后立即承诺同时扩展 Hybrid、MLA、Sparse MLA：应先在 7/20--7/24 收敛并复验 GQA 样例，7/25--7/31 准备/完成 TMG 评审和根据意见收尾 GQA PR；之后以独立阶段推进标准 MLA、Hybrid，Sparse MLA 因 GLM loader/16 NPU 资源依赖列为条件性阶段，不阻塞首个 PR。
 - 对外完成标准需写为“固定配置下 metadata（tensor 数、shape、dtype、contiguous）及生成 token ID 一致，且无明显启动/KV 容量回归”；不要将此次重构表述为性能提升，也不要直接使用“测试验证吗提交 PR”这类未明确验收条件的表述。
+
+### 2026-07-20：澄清通用 fallback
+
+- “通用 fallback”不是模型类别，指 `KVCacheSpec` 没有专用 Ascend `get_kv_cache_layout()` 映射时使用的默认/兜底布局。当前 `_kvcachespec_get_kv_cache_layout()` 为未单独 patch 的 spec（代码注释举例 `ChunkedLocalAttentionSpec`、`EncoderOnlyAttentionSpec`、`CrossAttentionSpec`）返回 `SingleTensorLayout`，避免初始化因缺少 Layout 选择而直接失败。
+- 面向导师的材料应使用“默认兜底布局（未配置专用 Layout 的 CacheSpec）”替代英文 “通用 fallback”，并说明它不等价于已完成所有未知模型的正确性适配；新增模型仍应根据实际算子接口提供专用 Layout 和验证。
