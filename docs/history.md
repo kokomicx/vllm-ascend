@@ -762,3 +762,9 @@ vllm-ascend/
 
 - “整理个详细的计划”应理解为提供可执行的项目推进表，而非重复技术背景：需明确 GQA-first 的范围与非范围、每阶段任务、代码/测试/文档产出、通过标准、风险与依赖、TMG 评审节点，以及评审后向 MLA/Hybrid/Sparse MLA 扩展的决策条件。
 - 计划应以“先最小 GQA 样例、获得 TMG 设计反馈、再分模型逐步扩展”为主线；GQA 阶段的完成定义应包含最小 diff、gate 回滚、单测、A3 gate=0/1 metadata 与 token-ID 一致性证据、无性能回归的基本观测和可评审材料。Sparse MLA 的真实模型加载环境是独立风险，不能作为首阶段阻塞条件或完成承诺。
+
+### 2026-07-20：拟定 GQA-first 的分阶段交付计划
+
+- 拟按当前日期（2026-07-20）给出四周滚动计划：7/20--7/24 收敛 GQA 最小 diff、补测试并复现 A3 A/B；7/27--7/31 准备材料、参加 TMG 设计/代码评审并按意见收尾 GQA PR；8/03--8/07 在评审边界稳定后扩展标准 MLA；8/10--8/14 扩展 Hybrid。Sparse MLA 在 8/17 起作为条件性独立阶段：先解决 GLM-5-W4A8 加载/资源问题，环境恢复后再做实现核对与真实 gate A/B，且不阻塞 GQA PR。
+- 每个模型阶段采用相同完成定义：代码范围和调用链说明、相关 Layout 单测、gate=0/1 真实 NPU metadata（tensor 数/shape/dtype/contiguous）与固定生成 token-ID 比较、容量/启动日志的无明显回归观测、可复现实验命令和回滚开关。性能提升不作为本次重构的承诺；只报告正确性与无明显性能/容量回归。
+- GQA 首个 PR 的理想范围是通用 Layout 基类、`SplitKVLayout`、GQA spec 映射、Runner 的通用 dispatch/绑定、feature gate 和必要测试；其他复杂 Layout 的代码应根据 TMG 意见拆为后续独立提交，避免首轮评审被 MLA/Sparse/Mamba 特例淹没。
