@@ -733,3 +733,11 @@ vllm-ascend/
 - 当前最高优先级验证缺口为 `GLM-5-W4A8` 的 Sparse MLA 真实 NPU A/B 验证。测试 harness 已支持显式 `--quantization ascend`，但此前重试受目标 16 个 NPU device 的 HBM 占用影响；资源可用后应以 TP=16、gate=1/0 顺序运行，并保留完整日志和 snapshot。
 - 后续工作还包括补齐其余 Layout 的验证证据、性能/内存无回归数据、CI 映射与格式检查、提交整理和 PR review；在验证充分且获得评审认可前，不删除旧路径或默认开启 gate。
 - 用户要求从本次对话起，持续将每次会话中的关键进展、代码变更、测试结果、结论和阻塞项追加至本文件；后续会话按此约定维护。
+
+### 2026-07-20：首版 KV Layout 重构代码导读
+
+- 按当前首版的真实调用顺序完成代码导读：`VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH=1` 在 `vllm_ascend/envs.py` 打开新路径；`model_runner_v1.py:initialize_kv_cache()` 进入 `_initialize_kv_cache_tensors_v2()`，依次完成 raw buffer 分配、Layout 驱动的 reshape、跨层共享与 cache 绑定。gate=0 仍完整保留 legacy 路径，作为安全回滚基线。
+- 分配阶段由 Runner 读取 `KVCacheTensor.size`（字节数）与 `shared_by`（共享该 storage 的层），按 Attention/Mamba/Hybrid 等上下文选择 Layout；Layout 的 `num_tensors()`、`split_sizes()` 与 `needs_alignment()` 决定分配几个 int8 原始字节 buffer、每段大小以及是否按 2 MiB 对齐。raw buffer 使用 int8 是为了按字节精确分配，不代表最终 attention cache 的逻辑 dtype。
+- `vllm_ascend/core/kv_cache_layout.py` 集中实现具体物理布局：`SingleTensorLayout`（单 buffer）、`SplitKVLayout`（独立 K/V）、`SparseMLALayout`/`SparseMLAC8Layout`（MLA latent、RoPE、indexer 及可选 scale）、`CompressedMLALayout`（一个 storage 上的多个 view/overlay）和 `MambaLayout`。每个策略同时负责字节切分和将 raw buffer view 为 backend/kernel 所需的 shape、dtype 与连续 tensor 结构。
+- `vllm_ascend/patch/platform/patch_kv_cache_interface.py` 为不同 `KVCacheSpec` 补充 `get_kv_cache_layout()`：普通 Full Attention 走 Split KV，MLA spec 根据压缩/稀疏/C8 属性选择相应 MLA Layout，Mamba 和通用 cache spec 走单 tensor Layout。reshape 时 Layout 仍调用 attention backend 的 `get_kv_cache_shape()`，因此最终算子 shape 以 backend 为准。
+- 当前首版的边界保持克制：Runner 仍承担生命周期调度、共享 buffer、分配和少量 Hybrid 兼容判断；Layout 类收敛物理布局细节。后续若要把 Layout 所有权进一步下沉到 backend，应作为独立演进，不混入当前首个小步 PR。
