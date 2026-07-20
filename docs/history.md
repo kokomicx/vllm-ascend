@@ -768,3 +768,9 @@ vllm-ascend/
 - 拟按当前日期（2026-07-20）给出四周滚动计划：7/20--7/24 收敛 GQA 最小 diff、补测试并复现 A3 A/B；7/27--7/31 准备材料、参加 TMG 设计/代码评审并按意见收尾 GQA PR；8/03--8/07 在评审边界稳定后扩展标准 MLA；8/10--8/14 扩展 Hybrid。Sparse MLA 在 8/17 起作为条件性独立阶段：先解决 GLM-5-W4A8 加载/资源问题，环境恢复后再做实现核对与真实 gate A/B，且不阻塞 GQA PR。
 - 每个模型阶段采用相同完成定义：代码范围和调用链说明、相关 Layout 单测、gate=0/1 真实 NPU metadata（tensor 数/shape/dtype/contiguous）与固定生成 token-ID 比较、容量/启动日志的无明显回归观测、可复现实验命令和回滚开关。性能提升不作为本次重构的承诺；只报告正确性与无明显性能/容量回归。
 - GQA 首个 PR 的理想范围是通用 Layout 基类、`SplitKVLayout`、GQA spec 映射、Runner 的通用 dispatch/绑定、feature gate 和必要测试；其他复杂 Layout 的代码应根据 TMG 意见拆为后续独立提交，避免首轮评审被 MLA/Sparse/Mamba 特例淹没。
+
+### 2026-07-20：导师用详细计划材料的组织方式
+
+- 为导师准备的计划将固定分为“实施思路/方案”和“实施计划”两部分：前者以当前代码路径解释问题、职责边界、GQA 最小样例与安全回滚；后者以 2026-07-20 起的阶段、目标模型、交付物、验收标准和风险处置列出可执行时间表。
+- 两张架构示意图用于区分重构前后职责与运行时调用链：重构前由 `model_runner_v1.py` 直接包含模型/量化分支、分配、reshape 与绑定；重构后由 Runner 统一调度，`KVCacheSpec.get_kv_cache_layout()` 选择 Layout，Layout 完成 split/reshape 并向 backend 获取最终 shape。图中应强调实际 raw memory allocation 和 cache binding 仍在 Runner，而非 Layout。
+- 计划提交口径：首个里程碑为 7/31 前完成 GQA 的最小、可回滚、可在 A3 复现的 PR/评审材料；标准 MLA、Hybrid 在 TMG 边界确认后分别推进；Sparse MLA 按 GLM 模型加载和 16 NPU 资源可用性作为条件性后续阶段，不阻塞 GQA 样例。
