@@ -786,3 +786,9 @@ vllm-ascend/
 - 当前代码中的 C8 是 `AscendMLAAttentionSpec.cache_sparse_c8=True` 触发的 Sparse MLA indexer-cache 量化布局，不应理解为整个模型或全部 KV cache 都是 8-bit。普通 Sparse MLA 有三项：`kv_lora`、`k_rope`、`indexer_k`，均以模型 cache dtype（当前案例为 bf16）存储；C8 模式将仅 `indexer_k` 转为 int8，并额外保存每 token 的 fp16 `indexer_scale`，因此物理 cache tuple 从 3 个 tensor 变为 4 个 tensor。
 - `SparseMLAC8Layout` 对应的实际 tuple 为 `(kv_lora bf16, k_rope bf16, indexer_k int8, indexer_scale fp16)`；indexer key 的 C8 存储用于降低 cache 内存，并供 `Lightning_indexer_quant` 以 int8 路径计算。`sparse_kv_cache_ratio` 通过虚拟维度纳入 bf16/int8/fp16 的字节差异，确保 Runner 按正确字节比例切分 raw storage。
 - 文档中宜将“C8 等场景”替换为“Sparse MLA 启用 `cache_sparse_c8` 的 indexer key int8 量化场景”，避免与权重 W8A8、通用 KV cache dtype 或 DeepSeek V4 的压缩/scale 布局混淆。
+
+### 2026-07-20：澄清跨层共享与 cache 绑定
+
+- “跨层共享”是指多个 layer 复用同一个底层 KV cache allocation，而不是把不同层的数据相互混写。其一，`KVCacheTensor.shared_by` 中的所有层名在分配阶段被赋予同一 raw tensor/tuple；其二，reshape 后 `self.shared_kv_cache_layers` 显式将共享层的 `kv_caches[layer_name]` 指向目标层同一个逻辑 cache 对象。这样只分配一次存储，并由上游的 cache-group/shared-layer 配置保证该共享合法。
+- “cache 绑定”是指将按 Layout reshape 完的 `kv_caches: {layer_name: cache}` 同时写入 `ModelRunner.self.kv_caches` 和 `compilation_config.static_forward_context[layer_name].kv_cache`。随后模型 forward 中每个 attention layer 从自己的 forward context 取得对应 cache，而不是在运行时再次查找或 reshape。普通路径调用 upstream `bind_kv_cache()`；DeepSeek V4 因层排序需求走等价的显式绑定分支。
+- 对外表述宜写为“Runner 处理跨层共享关系，并将 reshape 后的 layer cache 绑定到 forward context 和 Runner cache 列表”，这比笼统的“跨层共享与 cache 绑定”更易理解且不暗示 Layout 类负责这些生命周期动作。
