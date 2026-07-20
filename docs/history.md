@@ -747,3 +747,9 @@ vllm-ascend/
 - 当前工作概括方向正确，但应严格区分职责：各 `KVCacheLayout` 子类负责描述一种物理 KV cache 布局的**分配契约**（物理 tensor 数、总字节数的切分比例、逻辑 reshape/view、是否需要对齐）；`ModelRunner` 仍统一执行设备 raw buffer 分配、2 MiB 对齐分配、跨层共享、生命周期调度和 cache 绑定。因此不宜表述为 Layout 子类直接负责内存分配或实际完成对齐。
 - 对外验证表述应使用“gate=0 legacy 路径与 gate=1 Layout-dispatch 路径”而非笼统的“修改前后”：已在 A3 环境完成 GQA、Hybrid、标准 MLA 的真实模型 A/B 正确性验证，比较内容包括每层 cache metadata（shape、dtype、contiguous）以及固定生成请求的 token ID；三类模型均一致。该证据证明功能语义未回归，不应外推为性能提升结论。
 - 汇报时保留当前边界与待办：首版仍由 Runner 选择/调度 Layout 并保留少量 Hybrid 兼容逻辑；Sparse MLA 的 GLM-5-W4A8 真实 A/B 仍受模型加载/资源环境阻塞，尚不能宣称已完成 Sparse MLA 正确性验证。
+
+### 2026-07-20：首个可评审样例收敛计划
+
+- 根据导师建议，后续对外推进先以 GQA 作为最小样例，而不是第一轮同时按所有模型类别展开。GQA 对应 `FullAttentionSpec -> SplitKVLayout`，边界清晰：将 Runner 中普通 K/V 的字节切分与 reshape 特例收敛为 Layout，实现和验证成本最低，适合作为设计样板。
+- GQA 样例闭环计划为：梳理并最小化 GQA 相关 diff；保留 gate=0 回滚；补齐/整理 `SplitKVLayout` 单测；在 A3 上复现 gate=0/1 的 cache metadata 与固定请求 token-ID 一致性；说明未观察到性能回归但不将重构宣称为性能优化；再带着代码、测试证据和后续 MLA/Hybrid/Sparse MLA 的扩展路线参加 TMG 评审，依据意见决定如何拆分或扩展后续 PR。
+- 已有 MLA/Hybrid 验证作为实现可扩展性的补充证据保留，但在首次 TMG 讨论中不作为扩大首个提交范围的理由；Sparse MLA 不纳入首个样例的完成承诺，待 GLM 环境问题解决后单独验证。
