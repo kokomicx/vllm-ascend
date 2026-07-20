@@ -815,3 +815,9 @@ vllm-ascend/
 - 导师担心的不是“类”这一语法形式，而是无收益的搬家：若原来的 `if GQA / elif MLA / elif Sparse / ...` 被逐字改写成 `GQALayout / MLALayout / SparseLayout / ...`，总代码和理解路径都会增加，`ModelRunner` 只是变短而系统没有更简单。
 - 应按可复用的 storage pattern 判断：GQA 的 K/V 与标准 MLA 的 latent/NoPE、K-RoPE 都是“两段独立连续 tensor”，尺寸/语义差异可通过 spec 参数表达，优先共用 `SplitKVLayout`；普通 Sparse MLA 的三段、C8 Sparse MLA 的四段理论上可进一步研究能否用一个通用“字段列表/多 tensor”机制表达，而非先固定为两个模型类；Compressed MLA 的同一 storage overlay 和 Mamba 的异构多 state view 是存储关系本质不同的候选特殊实现。
 - GQA-first 的真正问题是验证 `SplitKVLayout` 这一个抽象是否既减少 Runner 分支、又能复用于标准 MLA；若不能显著减少重复或只服务单一模型，应改为更小的 helper/参数化接口，而不是继续扩展 Layout 类体系。
+
+### 2026-07-20：最小 SplitKVLayout 的适用边界复核
+
+- 结论：严格定义为“两个独立连续 tensor”的最小 `SplitKVLayout` **不能同时服务所有当前 KV cache 模型**，但可服务 GQA 与标准 MLA。两者都可由两个独立字段及 spec 提供的维度/dtype 解释；当前通用 attention 实现也以 `kv_cache[0]`、`kv_cache[1]` 作为 K/V 输入。
+- 不能强行覆盖的代码级原因：普通 Sparse MLA 的算子契约需要 3 个独立 cache（latent、RoPE、Indexer K），C8 Sparse MLA 需要第 4 个不同 dtype 的 per-token scale；将这些字段塞进两个 tensor 会改变 DSA/Indexer 算子接收的独立 tensor/dtype 契约，而不是单纯重构。Compressed MLA 要从同一 raw storage 建立 scale/overlay view；Mamba 根据 `MambaSpec.shapes`/`dtypes` 切多个异构 state view；Hybrid 还需要 Runner 协调共享与后处理，均不是二 tensor split 可表达的关系。
+- 不建议为追求“一个 Layout 覆盖全部”而把 `SplitKVLayout` 扩展成任意字段、任意 overlay、任意 state 的万能类：这样它已不再是最小 SplitKV，且会重新形成复杂条件树。首个 GQA PR 应仅实现/验证可复用的二字段 split；Sparse/C8 可在后续评估抽成一个参数化 N-field helper，Compressed/Mamba 保持独立候选处理。TMG 评审后再决定是否引入该通用 helper，避免预先扩大抽象。
