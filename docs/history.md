@@ -722,6 +722,13 @@ vllm-ascend/
 
 - 根据用户决定，撤回 `KVCacheLayoutPlan`、backend mixin 和通用 `AttentionBackend` Plan patch，恢复到首版 `KVCacheLayout` 策略实现：`model_runner_v1.py` 在 gate=1 下按既有 Layout 策略分配并 reshape，保留 `VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH` 安全回滚开关。
 - 此次回退不否定之前已完成的 GQA、Hybrid、标准 MLA metadata/token parity 结果；目标是先以最小、稳定、易于评审的首版重构推进 PR。backend ownership 与更强的上游对齐留作后续独立优化，不在首个提交中扩大改动面。
+
+### 2026-07-20：KV Layout 重构工作总结口径
+
+- 当前保留并作为首版 PR 主体的工作是：将 `vllm_ascend/worker/model_runner_v1.py` 中分散的 KV cache allocate/reshape 特例收敛到 `vllm_ascend/core/kv_cache_layout.py` 的 `KVCacheLayout` 策略实现；已覆盖 `SingleTensorLayout`、`SplitKVLayout`、`SparseMLALayout`、`SparseMLAC8Layout`、`CompressedMLALayout` 和 `MambaLayout`，使每种布局集中定义物理 tensor 数、字节切分、reshape/view 和对齐要求。
+- Runner 的 gate=1 首版路径负责选择既有 Layout、分配 raw int8 buffer、按策略 reshape 并完成绑定；`VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH` 默认关闭，保留 gate=0 旧路径以便安全回滚。对应单测与 e2e snapshot/token-ID 比较工具已建立。
+- 已完成真实 NPU A/B 正确性证据：GQA Qwen3-30B-A3B（48 层）、Hybrid Qwen3.5-2B（24 层）、标准 MLA DeepSeek-V2-Lite-W8A8（27 层）均在 gate=0/1 下通过 metadata（shape/dtype/contiguous）与 8 token ID 一致性比较；Sparse MLA GLM-5-W4A8 仍受权重 loader 初始化异常阻塞，尚未形成 layout 正确性结论。
+- 曾探索将 Layout 选择进一步下沉为 backend-owned `KVCacheLayoutPlan`（提交 `35bb762`），但因其引入额外抽象层、Runner 保存 Plan 状态并扩展通用 backend API，不适合作为首版小步 PR，已由 `58044a4` 反向提交撤回。该探索只作为后续独立优化方向，不属于当前代码主线。
 - 已重新阅读 `history.md` 并确认当前主线：Layout-driven KV cache 重构仍由 `VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH` feature gate 保护；GQA、Hybrid 和标准 MLA 已完成 gate=0/1 的 metadata 与生成 token-ID 一致性验证。
 - 当前最高优先级验证缺口为 `GLM-5-W4A8` 的 Sparse MLA 真实 NPU A/B 验证。测试 harness 已支持显式 `--quantization ascend`，但此前重试受目标 16 个 NPU device 的 HBM 占用影响；资源可用后应以 TP=16、gate=1/0 顺序运行，并保留完整日志和 snapshot。
 - 后续工作还包括补齐其余 Layout 的验证证据、性能/内存无回归数据、CI 映射与格式检查、提交整理和 PR review；在验证充分且获得评审认可前，不删除旧路径或默认开启 gate。
