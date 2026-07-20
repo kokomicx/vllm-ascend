@@ -741,3 +741,9 @@ vllm-ascend/
 - `vllm_ascend/core/kv_cache_layout.py` 集中实现具体物理布局：`SingleTensorLayout`（单 buffer）、`SplitKVLayout`（独立 K/V）、`SparseMLALayout`/`SparseMLAC8Layout`（MLA latent、RoPE、indexer 及可选 scale）、`CompressedMLALayout`（一个 storage 上的多个 view/overlay）和 `MambaLayout`。每个策略同时负责字节切分和将 raw buffer view 为 backend/kernel 所需的 shape、dtype 与连续 tensor 结构。
 - `vllm_ascend/patch/platform/patch_kv_cache_interface.py` 为不同 `KVCacheSpec` 补充 `get_kv_cache_layout()`：普通 Full Attention 走 Split KV，MLA spec 根据压缩/稀疏/C8 属性选择相应 MLA Layout，Mamba 和通用 cache spec 走单 tensor Layout。reshape 时 Layout 仍调用 attention backend 的 `get_kv_cache_shape()`，因此最终算子 shape 以 backend 为准。
 - 当前首版的边界保持克制：Runner 仍承担生命周期调度、共享 buffer、分配和少量 Hybrid 兼容判断；Layout 类收敛物理布局细节。后续若要把 Layout 所有权进一步下沉到 backend，应作为独立演进，不混入当前首个小步 PR。
+
+### 2026-07-20：向导师汇报当前重构工作的表述校准
+
+- 当前工作概括方向正确，但应严格区分职责：各 `KVCacheLayout` 子类负责描述一种物理 KV cache 布局的**分配契约**（物理 tensor 数、总字节数的切分比例、逻辑 reshape/view、是否需要对齐）；`ModelRunner` 仍统一执行设备 raw buffer 分配、2 MiB 对齐分配、跨层共享、生命周期调度和 cache 绑定。因此不宜表述为 Layout 子类直接负责内存分配或实际完成对齐。
+- 对外验证表述应使用“gate=0 legacy 路径与 gate=1 Layout-dispatch 路径”而非笼统的“修改前后”：已在 A3 环境完成 GQA、Hybrid、标准 MLA 的真实模型 A/B 正确性验证，比较内容包括每层 cache metadata（shape、dtype、contiguous）以及固定生成请求的 token ID；三类模型均一致。该证据证明功能语义未回归，不应外推为性能提升结论。
+- 汇报时保留当前边界与待办：首版仍由 Runner 选择/调度 Layout 并保留少量 Hybrid 兼容逻辑；Sparse MLA 的 GLM-5-W4A8 真实 A/B 仍受模型加载/资源环境阻塞，尚不能宣称已完成 Sparse MLA 正确性验证。
