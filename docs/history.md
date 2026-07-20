@@ -774,3 +774,9 @@ vllm-ascend/
 - 为导师准备的计划将固定分为“实施思路/方案”和“实施计划”两部分：前者以当前代码路径解释问题、职责边界、GQA 最小样例与安全回滚；后者以 2026-07-20 起的阶段、目标模型、交付物、验收标准和风险处置列出可执行时间表。
 - 两张架构示意图用于区分重构前后职责与运行时调用链：重构前由 `model_runner_v1.py` 直接包含模型/量化分支、分配、reshape 与绑定；重构后由 Runner 统一调度，`KVCacheSpec.get_kv_cache_layout()` 选择 Layout，Layout 完成 split/reshape 并向 backend 获取最终 shape。图中应强调实际 raw memory allocation 和 cache binding 仍在 Runner，而非 Layout。
 - 计划提交口径：首个里程碑为 7/31 前完成 GQA 的最小、可回滚、可在 A3 复现的 PR/评审材料；标准 MLA、Hybrid 在 TMG 边界确认后分别推进；Sparse MLA 按 GLM 模型加载和 16 NPU 资源可用性作为条件性后续阶段，不阻塞 GQA 样例。
+
+### 2026-07-20：澄清 cache-only 与 Mamba 的实际代码语义
+
+- `cache_only_layers` 不是模型架构类别，而是 upstream vLLM 为 speculative decoding / draft model 的 `extract_hidden_states` 建立的 `CacheOnlyAttentionLayer` 命名空间：它将 target model 的 hidden states 直接写入缓存，输出被忽略，因此没有传统 attention 的 K/V 拆分。vLLM-Ascend 在 `model_runner_v1.py` 检测层名中的 `cache_only_layers` 后选择 `SingleTensorLayout`；`HiddenStateCacheSpec.get_kv_cache_layout()` 也映射到该 Layout，且项目中有 `test_cache_only_layers` 覆盖该映射。此前文档中的“cache-only”应明确写为“draft model hidden-state cache”，避免误称为一种模型。
+- Mamba 是状态空间模型/linear attention 的 state cache，使用 `MambaSpec` 与 `MambaLayout`：先分配一个 raw buffer，再依据 `MambaSpec.shapes` 与 `dtypes` carve 出 conv state、SSM state 等多个逻辑 tensor。vLLM-Ascend 实际 patch 了 `HybridAttentionMambaModelConfig` 的 page-size 对齐配置，并将 `MambaSpec.get_kv_cache_layout()` 映射到 `MambaLayout`；此前验证过的 Qwen3.5-2B 是 Hybrid（Attention + Mamba）真实模型案例。
+- 应修正文档表述：`SingleTensorLayout` 适用于 cache-only hidden-state cache、未知/通用 spec fallback，以及 Hybrid 共享 raw buffer 的兼容分配；纯 Mamba/linear-attention 不应写成“部分 Mamba 使用 SingleTensorLayout”，而应明确为 `MambaLayout`。Hybrid 情况是一个共享 raw buffer 上同时为 attention 和 Mamba 建立各自逻辑 view，仍保留 Runner 级协调处理。
