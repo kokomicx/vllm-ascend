@@ -780,3 +780,9 @@ vllm-ascend/
 - `cache_only_layers` 不是模型架构类别，而是 upstream vLLM 为 speculative decoding / draft model 的 `extract_hidden_states` 建立的 `CacheOnlyAttentionLayer` 命名空间：它将 target model 的 hidden states 直接写入缓存，输出被忽略，因此没有传统 attention 的 K/V 拆分。vLLM-Ascend 在 `model_runner_v1.py` 检测层名中的 `cache_only_layers` 后选择 `SingleTensorLayout`；`HiddenStateCacheSpec.get_kv_cache_layout()` 也映射到该 Layout，且项目中有 `test_cache_only_layers` 覆盖该映射。此前文档中的“cache-only”应明确写为“draft model hidden-state cache”，避免误称为一种模型。
 - Mamba 是状态空间模型/linear attention 的 state cache，使用 `MambaSpec` 与 `MambaLayout`：先分配一个 raw buffer，再依据 `MambaSpec.shapes` 与 `dtypes` carve 出 conv state、SSM state 等多个逻辑 tensor。vLLM-Ascend 实际 patch 了 `HybridAttentionMambaModelConfig` 的 page-size 对齐配置，并将 `MambaSpec.get_kv_cache_layout()` 映射到 `MambaLayout`；此前验证过的 Qwen3.5-2B 是 Hybrid（Attention + Mamba）真实模型案例。
 - 应修正文档表述：`SingleTensorLayout` 适用于 cache-only hidden-state cache、未知/通用 spec fallback，以及 Hybrid 共享 raw buffer 的兼容分配；纯 Mamba/linear-attention 不应写成“部分 Mamba 使用 SingleTensorLayout”，而应明确为 `MambaLayout`。Hybrid 情况是一个共享 raw buffer 上同时为 attention 和 Mamba 建立各自逻辑 view，仍保留 Runner 级协调处理。
+
+### 2026-07-20：澄清 Sparse MLA C8 场景
+
+- 当前代码中的 C8 是 `AscendMLAAttentionSpec.cache_sparse_c8=True` 触发的 Sparse MLA indexer-cache 量化布局，不应理解为整个模型或全部 KV cache 都是 8-bit。普通 Sparse MLA 有三项：`kv_lora`、`k_rope`、`indexer_k`，均以模型 cache dtype（当前案例为 bf16）存储；C8 模式将仅 `indexer_k` 转为 int8，并额外保存每 token 的 fp16 `indexer_scale`，因此物理 cache tuple 从 3 个 tensor 变为 4 个 tensor。
+- `SparseMLAC8Layout` 对应的实际 tuple 为 `(kv_lora bf16, k_rope bf16, indexer_k int8, indexer_scale fp16)`；indexer key 的 C8 存储用于降低 cache 内存，并供 `Lightning_indexer_quant` 以 int8 路径计算。`sparse_kv_cache_ratio` 通过虚拟维度纳入 bf16/int8/fp16 的字节差异，确保 Runner 按正确字节比例切分 raw storage。
+- 文档中宜将“C8 等场景”替换为“Sparse MLA 启用 `cache_sparse_c8` 的 indexer key int8 量化场景”，避免与权重 W8A8、通用 KV cache dtype 或 DeepSeek V4 的压缩/scale 布局混淆。
