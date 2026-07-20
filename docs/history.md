@@ -826,3 +826,11 @@ vllm-ascend/
 
 - 为避免当前 `feature/layout-refactor-phase3` 上的历史实验、文档记录和用户未提交草稿进入后续代码 PR，保留原工作区不动，并从最新官方 `origin/main` 的 `585d76c7`（2026-07-20）创建独立 Git worktree：`C:/Users/c50058674/code/vllm-ascend-gqa-pr`。
 - 新分支为 `feature/gqa-kv-layout-pr`，创建后 `git status --short` 为空；它不包含当前 feature 分支的 Layout 实验提交、history 文档提交或任何未提交的本地文件。后续 GQA 最小样例代码、测试和 PR 整理只在该目录/分支进行，当前 `C:/Users/c50058674/code/vllm-ascend` 继续保留为历史分析与材料工作区。
+
+### 2026-07-20：GQA SplitKVLayout 首个 PR 已提交并推送
+
+- 在干净工作区 `C:/Users/c50058674/code/vllm-ascend-gqa-pr` 中，基于 `origin/main` 创建的分支 `feature/gqa-kv-layout-pr` 已新增并推送提交 `107d9186`（`refactor(kv_cache): extract GQA split cache layout`，含 Signed-off-by）。该 PR 分支只包含 4 个代码/测试文件，不包含 history、实验脚本或原工作区的未提交内容。
+- 新增 `vllm_ascend/attention/kv_cache_layout.py` 中的最小 `SplitKVLayout`。它不是按模型堆叠的 Layout 类体系，也不是新的 Plan/调度层；它只封装“两个独立 raw byte buffer”的字节切分以及依据 attention backend 返回的 shape 建立 K/V view。字段参数为 `key_dim`、`value_dim`、各自 dtype 和 split factor，保留标准 MLA 等同样满足二字段物理契约场景的复用空间。
+- `vllm_ascend/worker/model_runner_v1.py` 的 `FullAttentionSpec`（GQA）路径现在通过 `_get_gqa_kv_cache_layout()` 构造该布局：量化场景仍调用原有 `get_kv_quant_split_factor()` / `get_kv_quant_dtype()`，非量化场景仍使用原有 `calc_split_factor()`；raw K/V allocation 与 reshape/view 由 Layout 承接。Hybrid、MLA、Sparse MLA、C8、Compressed MLA、Mamba 和 cache-only 等路径没有改动，避免首个样例扩大行为范围。
+- 新增 `tests/ut/attention/test_kv_cache_layout.py`，覆盖不同 K/V head dimension 的字节切分、shape 和 dtype；同时在 `tests/ut/worker/a2/test_model_runner_v1.py` 增加 GQA 的 `head_size=64`、`head_size_v=32` 集成覆盖，验证 runner 路由后 V 的独立维度没有被 K 维度覆盖。
+- 本机 `py_compile`、`ruff check`、`ruff format --check` 和 `git diff --check` 已通过；针对性 pytest 因当前 Windows Python 环境未安装 `torch`，在导入 `tests/ut/conftest.py` 时失败，未能在本机执行。后续必须在 A3/NPU 环境执行对应 UT，并用既有 `gate=0/1` metadata（tensor 数/shape/dtype/contiguous）和固定生成 token-ID 严格 A/B 验证 GQA 行为，再作为 PR 测试证据。
