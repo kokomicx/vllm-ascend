@@ -924,3 +924,8 @@ vllm-ascend/
 
 - 服务器 Python 确认加载 `/home/c50058674/kvcache/vllm/vllm/__init__.py`，版本为 `0.23.1rc1.dev1126+g6e073440b`；尝试导入 `vllm.v1.worker.gpu.spec_decode.dflash` 仍失败。该 sibling vLLM repo 的 HEAD 为 detached `9090368b650896bf5fc990c921df7eb4c20355a5`，而当前 vllm-ascend main/PR 要求的已验证 commit 为 `85c09e9885e346ea1612da30ebff5a75f67d2350`（v0.25.0）。
 - 因此测试环境失配被确证为 upstream vLLM `0.23` 对 `0.25`，不是 Python 路径猜测、NPU 卡问题或 SplitKVLayout 代码问题。下一步不应 checkout/reset 现有 `/home/c50058674/kvcache/vllm`（它可能被其他工作流使用）；应建立独立的匹配 vLLM source + 安装环境，或使用团队认可的 v0.25 A3 vllm-ascend 镜像，再让 GQA PR worktree 在该隔离环境中执行 UT/E2E。
+
+### 2026-07-21：built 模式切换 upstream vLLM 的处理原则
+
+- built/editable 模式可以切换到 vLLM `v0.25.0`，但必须同步完成源码 checkout、重新安装/构建 Python 包以及版本确认；仅切换 sibling `vllm` Git HEAD 而不重建，Python 仍可能加载旧构建产物。
+- 本机 `C:/Users/c50058674/code/vllm` 已包含目标 verified commit `85c09e9885e346ea1612da30ebff5a75f67d2350`，但当前存在 4 个未提交修改，因此不应直接切换或 reset。服务器侧也应先确认当前 checkout 是否属于自己且工作区干净；若不满足，应优先建立独立 v0.25 worktree/环境，而非覆盖共享的 `/home/c50058674/kvcache/vllm`。
