@@ -949,3 +949,8 @@ vllm-ascend/
 - 第二层验证不再依赖旧的 `VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH=0/1` gate，而是将 `feature/gqa-kv-layout-pr` 的 merge-base（重构前基线）与当前 PR HEAD 分别作为两次真实运行的代码源。两次运行必须使用同一 vLLM built 环境、同一 GQA 模型（`/mnt/weights/Qwen3-30B-A3B`）、同一空闲 NPU、相同 `max-model-len=2048`、`gpu_memory_utilization=0.80`、prompt、temperature=0 和 seed=42。
 - 复用已有的独立 E2E snapshot 工具：每次运行从 engine-core 内部通过 `VLLM_ASCEND_DUMP_KV_CACHE` 导出 metadata，并记录 8 个生成 token ID；随后严格比较 layer 数、每层 container/tensor 数、shape、dtype、contiguous 与 token ID。为了避免工具脚本自身所在目录意外决定被测源码，工具脚本应放在 `/tmp`，并以 `PYTHONPATH=<baseline-or-candidate-worktree>` 明确指定实际导入的 `vllm_ascend`。
 - 通过标准为 comparison 输出 `[PASS]`、所有层 metadata 一致且生成 token IDs identical；若全层仅第一维块数产生一致的 1-block 差异，应先排查运行间可用显存波动并用同一空闲 NPU重跑/反向运行，不应直接判断为代码回归。
+
+### 2026-07-21：长时 NPU 验证的会话可靠性
+
+- 真实模型 A/B 不应依赖 VS Code 前台集成终端持续存活。应使用 `nohup setsid bash -lc ... </dev/null >launcher.log 2>&1 &` 启动脱离 SSH/PTTY 的后台会话，并以 launcher PID、阶段日志和 `tail -f` 跟踪；这样 VS Code 断线、窗口关闭或集成终端重启不会中断任务。
+- 若后台日志最后仍显示 `Killed` 或终端退出码 `137`，则是进程/进程组被 SIGKILL（常见为 host/cgroup OOM 或集群资源管理）而非 VS Code 问题。`nohup` 只能保证会话脱离，不能规避内存杀进程；应保留日志并检查 `dmesg`/cgroup memory events、NPU 占用和模型/并行度/显存配置后再调整。
