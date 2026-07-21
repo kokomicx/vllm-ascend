@@ -919,3 +919,8 @@ vllm-ascend/
 
 - 在服务器对 `1d404b67` 执行 pytest 时，失败发生在 `tests/ut/conftest.py -> adapt_patch()` 的插件 patch 导入阶段，尚未收集或执行任何 SplitKVLayout/GQA/MLA 测试。`vllm_ascend.patch.worker.patch_v2.patch_triton` 需要 `vllm.v1.worker.gpu.spec_decode.dflash`，而当前 Python 实际加载的 upstream `vllm` 不存在该路径，报 `ModuleNotFoundError`。
 - 这表示服务器上 `vllm-ascend` checkout 已更新、但安装/加载的 upstream `vllm` 仍是不同版本或不同 source checkout；仅 `git pull vllm-ascend` 不会同步 sibling `vllm` repo 或 editable package。当前 vllm-ascend main 的 `.github/vllm-main-verified.commit` 为 `85c09e9885e346ea1612da30ebff5a75f67d2350`（release tag `v0.25.0`），应先只读确认服务器 `import vllm` 的文件路径和 Git HEAD，再在不覆盖用户现有 vllm 改动的前提下使用匹配 checkout/image 重建测试环境。不得为绕过导入错误而删除 patch、屏蔽 adapt_patch 或降级测试。
+
+### 2026-07-21：服务器 vLLM 失配已由只读检查确认
+
+- 服务器 Python 确认加载 `/home/c50058674/kvcache/vllm/vllm/__init__.py`，版本为 `0.23.1rc1.dev1126+g6e073440b`；尝试导入 `vllm.v1.worker.gpu.spec_decode.dflash` 仍失败。该 sibling vLLM repo 的 HEAD 为 detached `9090368b650896bf5fc990c921df7eb4c20355a5`，而当前 vllm-ascend main/PR 要求的已验证 commit 为 `85c09e9885e346ea1612da30ebff5a75f67d2350`（v0.25.0）。
+- 因此测试环境失配被确证为 upstream vLLM `0.23` 对 `0.25`，不是 Python 路径猜测、NPU 卡问题或 SplitKVLayout 代码问题。下一步不应 checkout/reset 现有 `/home/c50058674/kvcache/vllm`（它可能被其他工作流使用）；应建立独立的匹配 vLLM source + 安装环境，或使用团队认可的 v0.25 A3 vllm-ascend 镜像，再让 GQA PR worktree 在该隔离环境中执行 UT/E2E。
