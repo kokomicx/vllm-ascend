@@ -839,3 +839,8 @@ vllm-ascend/
 
 - 在 `k8s-node-48` 执行 `git fetch myfork feature/gqa-kv-layout-pr` 时出现 `ssh: Could not resolve hostname github.com: Temporary failure in name resolution`。这说明服务器当前无法通过 DNS 将 `github.com` 解析为 IP，失败发生在 SSH 连接建立之前；它不表示远程分支不存在，也不是 Git SSH key、GitHub 仓库权限或本地 worktree 的问题。
 - 应先在服务器检查 `getent hosts github.com`、`getent hosts ssh.github.com`、`cat /etc/resolv.conf` 及集群规定的代理/DNS 配置；DNS 恢复后重试原 `git fetch` 即可。不要通过改 hosts、关闭证书校验或把 GitHub IP 硬编码为长期方案绕过集群网络策略。
+
+### 2026-07-21：DNS 检查结果确认
+
+- `k8s-node-48` 上 `getent hosts github.com` 和 `getent hosts ssh.github.com` 均无输出；`/etc/resolv.conf` 仅配置 `nameserver 90.90.96.1` 与搜索域 `huawei.com`。因此该环境当前不能直接连接或拉取 GitHub 远端，需等待/申请 DNS、代理或内部 Git 镜像访问恢复后再执行 `git fetch`。
+- 当前 `myfork` 的 URL 确实是 `git@github.com:kokomicx/vllm-ascend.git`，所以目标分支在 GitHub；失败原因是服务器侧网络解析不可用，而非分支未推送。`ip: command not found` 只表示容器镜像未安装 iproute2 工具，对上述 DNS 结论没有影响。
