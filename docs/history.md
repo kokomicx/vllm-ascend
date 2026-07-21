@@ -887,3 +887,9 @@ vllm-ascend/
 - 用户此前看到的 3/4 个独立 tensor 是对**整个 Sparse MLA/SFA cache 拓扑**的正确计数，而非只看主 MLA cache。当前代码应分开看：主 `AscendMLAAttentionSpec` 与独立 `AscendSFAIndexerCacheSpec`。普通 Sparse MLA 为主 latent/NoPE + RoPE 两个 tensor，加未量化 indexer K 一个 tensor，共 3 个。
 - 当主 MLA 仍为 two-field、但 Indexer 启用 C8 并有 scale 时，主 two-field + indexer K + indexer scale，共 4 个 tensor；这正是此前“C8 Sparse MLA 四 tensor”的来源。若 `current_sparse_c8` 同时使主 MLA cache 走单 packed-field 路径，则主 cache 为 1，加量化 indexer K/scale 2，共 3 个。故不能仅按“是否 C8”固定说总数一定为 3 或 4，必须检查 main spec 的 `cache_sparse_c8`、Indexer `scale_dim` 及最终 snapshot。
 - 当前 `SplitKVLayout` 仅覆盖 main spec 实际为 two-field 的情形（普通 GQA 或 MLA main cache）；`AscendSFAIndexerCacheSpec` 已在 Runner 中先于 generic attention 分支单独分配/reshape。主 packed C8 仍保留 one-field 专用路径。这一划分与真实 spec/算子 tuple 契约一致。
+
+### 2026-07-21：澄清标准 MLA 与 Sparse MLA 的第三个 tensor 来源
+
+- 标准（非 Sparse）MLA 的主 attention cache 只有两个 tensor：latent/NoPE（由 `kv_lora_rank` 决定）和 RoPE（由 `qk_rope_head_dim` 决定）；它正是 `SplitKVLayout` 覆盖的二字段 MLA 场景，不存在第三个 Indexer tensor。
+- Sparse MLA 在这对主 cache 之外新增了 SFA Indexer cache，因而普通 Sparse MLA 总计为 3：`(latent/NoPE, RoPE)` 由主 `AscendMLAAttentionSpec` 走 `SplitKVLayout`，`(indexer_k,)` 由独立 `AscendSFAIndexerCacheSpec` 走其专用分支。Indexer C8 时该独立分支返回 `(indexer_k, indexer_scale)`，与主 two-field 合计为 4。
+- Runner 的处理顺序体现了该边界：先识别 `AscendSFAIndexerCacheSpec` 并独立 allocation/reshape，再处理 generic attention 的主 MLA spec；二者最终以不同 layer name 的 cache entry 绑定给对应模块。不能把第三个 indexer tensor 当作主 MLA two-field Layout 的第三字段，否则会混淆独立 spec、DCP replication、scale dtype 与算子输入契约。
