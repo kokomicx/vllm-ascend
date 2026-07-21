@@ -949,6 +949,7 @@ vllm-ascend/
 - 第二层验证不再依赖旧的 `VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH=0/1` gate，而是将 `feature/gqa-kv-layout-pr` 的 merge-base（重构前基线）与当前 PR HEAD 分别作为两次真实运行的代码源。两次运行必须使用同一 vLLM built 环境、同一 GQA 模型（`/mnt/weights/Qwen3-30B-A3B`）、同一空闲 NPU、相同 `max-model-len=2048`、`gpu_memory_utilization=0.80`、prompt、temperature=0 和 seed=42。
 - 复用已有的独立 E2E snapshot 工具：每次运行从 engine-core 内部通过 `VLLM_ASCEND_DUMP_KV_CACHE` 导出 metadata，并记录 8 个生成 token ID；随后严格比较 layer 数、每层 container/tensor 数、shape、dtype、contiguous 与 token ID。为了避免工具脚本自身所在目录意外决定被测源码，工具脚本应放在 `/tmp`，并以 `PYTHONPATH=<baseline-or-candidate-worktree>` 明确指定实际导入的 `vllm_ascend`。
 - 通过标准为 comparison 输出 `[PASS]`、所有层 metadata 一致且生成 token IDs identical；若全层仅第一维块数产生一致的 1-block 差异，应先排查运行间可用显存波动并用同一空闲 NPU重跑/反向运行，不应直接判断为代码回归。
+- 复核后发现，当前干净的 `feature/gqa-kv-layout-pr` 及其重构前基线均未包含 `VLLM_ASCEND_DUMP_KV_CACHE` 的 engine-core snapshot 导出钩子；该钩子只存在于旧 phase3 工作区。因此不能直接将旧 `test_layout_correctness.py` 用于这两个 checkout，否则模型运行后会因缺少 JSON snapshot 失败。正确策略是先执行不依赖插桩的真实 token-ID A/B；如需 metadata 证据，再在两个独立测试 worktree 上施加相同的、绝不进入 PR 的临时插桩。
 
 ### 2026-07-21：长时 NPU 验证的会话可靠性
 
