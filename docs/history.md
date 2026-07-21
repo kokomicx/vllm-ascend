@@ -849,3 +849,8 @@ vllm-ascend/
 
 - 随后在同一服务器执行默认 `git pull` 成功：其 `origin` 使用 HTTPS URL `https://github.com/kokomicx/vllm-ascend`，并已拉取 `origin/feature/gqa-kv-layout-pr`。因此服务器不是完全不能访问 GitHub；此前失败的范围应精确表述为 `myfork` 的 SSH URL `git@github.com:...` 无法解析/连接，而非 HTTPS Git 访问整体不可用。
 - 后续服务器侧应直接使用已经成功的 `origin` 远端：从 `origin/feature/gqa-kv-layout-pr` 创建或切换工作区，无需再使用失败的 `myfork` SSH 远端。HTTPS 能成功而本地 `getent` 无结果，通常意味着 Git 配置/环境走了企业 HTTPS 代理或其他受管网络通道；无需也不应手动更改系统 DNS。
+
+### 2026-07-21：本地 GQA PR 工作区确认
+
+- 本地原工作区 `C:/Users/c50058674/code/vllm-ascend` 仍停留在 `feature/layout-refactor-phase3`，且存在用户的未提交代码、文档与生成文件，不能安全地直接执行 `git switch` 到 GQA 分支。为保护这些改动，原工作区保持不动。
+- 干净独立工作区 `C:/Users/c50058674/code/vllm-ascend-gqa-pr` 已经处于 `feature/gqa-kv-layout-pr`，工作区干净，HEAD 为 `107d9186`。后续本地查看、修改、提交和 PR 准备应在该目录进行；它就是当前已切换到 GQA 分支的本地代码副本。
