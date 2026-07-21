@@ -929,3 +929,7 @@ vllm-ascend/
 
 - built/editable 模式可以切换到 vLLM `v0.25.0`，但必须同步完成源码 checkout、重新安装/构建 Python 包以及版本确认；仅切换 sibling `vllm` Git HEAD 而不重建，Python 仍可能加载旧构建产物。
 - 本机 `C:/Users/c50058674/code/vllm` 已包含目标 verified commit `85c09e9885e346ea1612da30ebff5a75f67d2350`，但当前存在 4 个未提交修改，因此不应直接切换或 reset。服务器侧也应先确认当前 checkout 是否属于自己且工作区干净；若不满足，应优先建立独立 v0.25 worktree/环境，而非覆盖共享的 `/home/c50058674/kvcache/vllm`。
+
+### 2026-07-21：服务器上游 vLLM 的直接切换授权
+
+- `/home/c50058674/kvcache/vllm` 已由用户确认仅供自己维护，因此可直接切换该 checkout 至 verified upstream commit `85c09e9885e346ea1612da30ebff5a75f67d2350`（v0.25.0），不需要另建 worktree。切换前仍须用 `git status` 检查并以可恢复的 stash 保存任何未提交修改，切换后必须重新以 editable/built 方式安装，不能只改变 Git HEAD。
