@@ -955,3 +955,8 @@ vllm-ascend/
 
 - 真实模型 A/B 不应依赖 VS Code 前台集成终端持续存活。应使用 `nohup setsid bash -lc ... </dev/null >launcher.log 2>&1 &` 启动脱离 SSH/PTTY 的后台会话，并以 launcher PID、阶段日志和 `tail -f` 跟踪；这样 VS Code 断线、窗口关闭或集成终端重启不会中断任务。
 - 若后台日志最后仍显示 `Killed` 或终端退出码 `137`，则是进程/进程组被 SIGKILL（常见为 host/cgroup OOM 或集群资源管理）而非 VS Code 问题。`nohup` 只能保证会话脱离，不能规避内存杀进程；应保留日志并检查 `dmesg`/cgroup memory events、NPU 占用和模型/并行度/显存配置后再调整。
+
+### 2026-07-21：GQA token A/B 的 Transformers 依赖阻塞
+
+- 第一次后台 token A/B 尚未加载 Qwen3-8B，即在 vLLM general plugin 注册阶段失败：`vllm_ascend.patch.hunyuan_vl_processor_compat` 从 `transformers` 导入 `HunYuanVLProcessor` 时抛出 `ImportError`。当前 vllm-ascend `pyproject.toml` 固定要求 `transformers==5.14.1`，而服务器已安装的 Transformers 不包含该类，说明 built 环境依赖未与当前源码同步；应先安装/确认该精确版本，再重试。
+- 日志中 baseline 的 `vllm_ascend source` 错误显示为候选 `.../vllm-ascend/...`，原因是 Python 从 stdin 启动时将当前工作目录（候选 repo）置于 `PYTHONPATH` 之前。修正版后台命令必须在每个 case 内 `cd` 到不含源码包的运行目录后再设置 `PYTHONPATH=<baseline-or-candidate>`，否则不能声称完成代码基线 A/B。
