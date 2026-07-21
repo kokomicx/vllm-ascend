@@ -937,3 +937,9 @@ vllm-ascend/
 ### 2026-07-21：direct switch 后的 dflash 复核状态
 
 - 服务器执行 Python 导入已成功找到 `vllm.v1.worker.gpu.spec_decode.dflash.speculator`，说明此前阻断 pytest 的缺失模块已不再缺失；`vllm.__version__` 仍显示 `0.23.1rc1.dev1126+g6e073440b`，但这在源码构建场景中不能单独判定不兼容。由于用户此前实验也使用这一版本标签，下一步应直接运行目标 UT；同时保留 Git HEAD 与实际 import 路径，作为最终 PR 测试环境说明。
+
+### 2026-07-21：GQA SplitKVLayout NPU 单元测试通过
+
+- 在服务器 `feature/gqa-kv-layout-pr` 的 `1d404b67` 上执行 `python -m pytest -q tests/ut/attention/test_kv_cache_layout.py tests/ut/worker/a2/test_model_runner_v1.py`，结果为 **20 passed**（9.01 秒）。`git status --short` 没有输出，表明测试在干净的 PR checkout 上执行。
+- 该结果证明：vLLM-Ascend 插件及其 patch 可以正常导入；`SplitKVLayout` 对 two-field raw byte split、不同 K/V field dimension 的 dtype/view reshape 契约成立；NPUModelRunner 能依据层级 `FullAttentionSpec` 进行 GQA raw K/V 分配和 reshape，且 V 的独立 `head_size_v` 不会误复用 K 的 dimension。现有覆盖也同时回归了 Sparse MLA main/indexer 相关的 runner 路由。
+- 此为 PR 的第一层正确性证据（Python/Runner 逻辑），但尚不等价于真实模型推理精度证明；后续仍需在同一 NPU 环境以 GQA 模型完成旧基线与新分支的 KV metadata 和固定生成 token ID A/B 对比。
