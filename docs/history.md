@@ -960,3 +960,8 @@ vllm-ascend/
 
 - 第一次后台 token A/B 尚未加载 Qwen3-8B，即在 vLLM general plugin 注册阶段失败：`vllm_ascend.patch.hunyuan_vl_processor_compat` 从 `transformers` 导入 `HunYuanVLProcessor` 时抛出 `ImportError`。当前 vllm-ascend `pyproject.toml` 固定要求 `transformers==5.14.1`，而服务器已安装的 Transformers 不包含该类，说明 built 环境依赖未与当前源码同步；应先安装/确认该精确版本，再重试。
 - 日志中 baseline 的 `vllm_ascend source` 错误显示为候选 `.../vllm-ascend/...`，原因是 Python 从 stdin 启动时将当前工作目录（候选 repo）置于 `PYTHONPATH` 之前。修正版后台命令必须在每个 case 内 `cd` 到不含源码包的运行目录后再设置 `PYTHONPATH=<baseline-or-candidate>`，否则不能声称完成代码基线 A/B。
+
+### 2026-07-21：Qwen3-8B GQA 真实 token A/B 结果
+
+- 在 NPU3、`/home/weight/Qwen3-8B`、`max_model_len=2048`、`gpu_memory_utilization=0.80`、eager 模式、固定 prompt `Hello, how are you?`、`temperature=0`、seed=42 与 8 个生成 token 的条件下，后台任务完成模型加载、KV cache 创建和真实生成。比较输出为 `[PASS] Generated token IDs are identical (8 tokens)`，两侧 token IDs 均为 `[358, 2776, 264, 501, 1196, 11, 773, 358]`，文本均为 `" I'm a new user, so I"`。
+- EngineCore 在生成完成后接收 SIGTERM 并执行 teardown 属于 LLM 生命周期收尾；比较任务正常到达 `=== PASSED ===`，不应将此处 shutdown 日志视为测试失败。由于此前发现 stdin 启动的工作目录可能覆盖 baseline 的 `PYTHONPATH`，该结果在作为“基线 vs PR”最终证据前仍须从 launcher log 确认 baseline 与 PR 分别实际导入不同 worktree 的 `vllm_ascend/__init__.py`。
