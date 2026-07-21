@@ -933,3 +933,7 @@ vllm-ascend/
 ### 2026-07-21：服务器上游 vLLM 的直接切换授权
 
 - `/home/c50058674/kvcache/vllm` 已由用户确认仅供自己维护，因此可直接切换该 checkout 至 verified upstream commit `85c09e9885e346ea1612da30ebff5a75f67d2350`（v0.25.0），不需要另建 worktree。切换前仍须用 `git status` 检查并以可恢复的 stash 保存任何未提交修改，切换后必须重新以 editable/built 方式安装，不能只改变 Git HEAD。
+
+### 2026-07-21：direct switch 后的 dflash 复核状态
+
+- 服务器执行 Python 导入已成功找到 `vllm.v1.worker.gpu.spec_decode.dflash.speculator`，说明此前阻断 pytest 的缺失模块已不再缺失；不过 `vllm.__version__` 仍显示旧的 `0.23.1rc1.dev1126+g6e073440b`。在用 Git `HEAD`、源码 version 文件和 `importlib.metadata` 交叉确认前，不能仅凭模块存在就宣布 v0.25.0 切换完成，也不应立即把后续 UT 结果作为 PR 证据。
