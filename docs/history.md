@@ -909,3 +909,8 @@ vllm-ascend/
 
 - 当前 PR `feature/gqa-kv-layout-pr` HEAD 为 `1d404b67`，验证范围固定为 GQA 和标准 MLA main cache 的 shared two-field path。服务器验证应分三层：先执行 `tests/ut/attention/test_kv_cache_layout.py` 与 `tests/ut/worker/a2/test_model_runner_v1.py`；再用相同 GQA 模型、NPU/TP/采样参数分别在 upstream main baseline 与 PR worktree 运行真实生成，严格比较每层 cache metadata 与生成 token ID；最后对标准 MLA 重复同一 A/B。Sparse MLA/Indexer 暂不纳入本轮，避免将未完成的独立路径验证与本 PR 混淆。
 - 干净 PR worktree 基于 upstream main，不包含此前本地未提交的 `tests/e2e/test_layout_correctness.py`、`compare_kv_cache_shapes.py` 等辅助脚本；这符合“PR 只含简洁相关代码与 UT”的范围。进行真实 A/B 前，应先确认服务器上这些辅助脚本是否作为独立、已验证的测试工具可用；不能把原工作区未提交脚本静默混入 PR。若需要将其作为可复现 PR 证据，应另行清理、补测并审慎纳入测试提交。
+
+### 2026-07-21：服务器 detached HEAD 同步状态
+
+- 在 `k8s-node-48` 原工作目录中，`git pull` 已成功 fetch 并把 `origin/feature/gqa-kv-layout-pr` 从 `107d9186` 更新到 `1d404b67`，但当前 HEAD 仍 detached 于旧提交 `107d9186`，所以默认 `git pull` 无法决定目标分支并按预期报错。此错误不表示 fetch 失败。
+- 应在该目录执行 `git switch -c feature/gqa-kv-layout-pr --track origin/feature/gqa-kv-layout-pr`（本地分支尚不存在时）以附着到已更新的远端跟踪分支；随后 `git log -1 --oneline` 应显示 `1d404b67`，再执行 UT。若后续使用独立 worktree，应避免同一本地分支同时被多个 worktree checkout。
