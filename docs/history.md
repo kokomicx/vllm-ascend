@@ -881,3 +881,9 @@ vllm-ascend/
 
 - “Sparse C8 主 cache 是单个 packed field”只描述 `current_sparse_c8` 对应的主 MLA cache 路径，不表示整个 Sparse MLA 只有一个 cache。该路径在分配阶段令 `k_tensor_size=kv_cache_tensor.size` 并只返回 `(k_tensor,)`；reshape 阶段只解包 `raw_k_tensor`，以 C8 dtype 建立一个主 cache view，最终绑定 `(k_cache,)`，没有独立 `raw_v_tensor` 或 V view。
 - 与之相对，GQA 使用独立 raw K 和 raw V；标准 MLA 使用独立 raw latent/NoPE 与 raw RoPE，因此可用 `SplitKVLayout`。若强行把 Sparse C8 放进二字段 Layout，只能虚构一个 V/第二字段或零大小 buffer，会改变 allocation、对齐和算子输入 tuple 的真实契约。Sparse C8 的 SFA indexer K 和可选 scale 仍通过独立 `AscendSFAIndexerCacheSpec`/专用路径分配和绑定；它们不应与主 packed field 混为一谈。
+
+### 2026-07-21：修正 Sparse MLA/SFA 的 3/4 tensor 计数口径
+
+- 用户此前看到的 3/4 个独立 tensor 是对**整个 Sparse MLA/SFA cache 拓扑**的正确计数，而非只看主 MLA cache。当前代码应分开看：主 `AscendMLAAttentionSpec` 与独立 `AscendSFAIndexerCacheSpec`。普通 Sparse MLA 为主 latent/NoPE + RoPE 两个 tensor，加未量化 indexer K 一个 tensor，共 3 个。
+- 当主 MLA 仍为 two-field、但 Indexer 启用 C8 并有 scale 时，主 two-field + indexer K + indexer scale，共 4 个 tensor；这正是此前“C8 Sparse MLA 四 tensor”的来源。若 `current_sparse_c8` 同时使主 MLA cache 走单 packed-field 路径，则主 cache 为 1，加量化 indexer K/scale 2，共 3 个。故不能仅按“是否 C8”固定说总数一定为 3 或 4，必须检查 main spec 的 `cache_sparse_c8`、Indexer `scale_dim` 及最终 snapshot。
+- 当前 `SplitKVLayout` 仅覆盖 main spec 实际为 two-field 的情形（普通 GQA 或 MLA main cache）；`AscendSFAIndexerCacheSpec` 已在 Runner 中先于 generic attention 分支单独分配/reshape。主 packed C8 仍保留 one-field 专用路径。这一划分与真实 spec/算子 tuple 契约一致。
