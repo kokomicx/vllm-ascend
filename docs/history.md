@@ -876,3 +876,8 @@ vllm-ascend/
 - `SplitKVLayout.reshape()` 改为接收由 attention backend shape 派生的 `key_shape` 与 `value_shape`，并断言二者最后一维与 Layout field dim 一致；这使同一 Layout primitive 能支持 GQA backend 的 K/V 形态和 MLA backend 的 latent/NoPE、RoPE 形态，而无需按模型新建 Layout 类。Runner 仍负责 backend shape 获取、raw allocation、shared_by 和 cache 生命周期；Layout 只负责二字段的 bytes split、dtype 与 view。
 - Sparse C8 主 cache 仍是单 packed field，不能伪装为 two-field Layout，因此保留专用单 tensor 分支；SFA indexer、Compressed MLA、Hybrid shared raw storage、Mamba 和 cache-only 同样维持既有专用处理。重构不以强行统一不同物理契约为目标。
 - 相对上游基线 `585d76c7`，总 PR diff 为 166 additions / 56 deletions；其中 `model_runner_v1.py` 为 53 additions / 56 deletions（净减少 3 行）。新增 Layout 和测试文件使 PR 总行数仍增加，但原 Runner generic 分支中内联的维度 split、量化 factor/dtype 选择、双 raw allocation 与双 view 已出现实际红色删除，职责和重复逻辑均得到收敛。`py_compile`、`ruff check`、`ruff format --check`、`git diff --check` 通过；pytest 仍在 Windows 环境因缺少 `torch` 的 conftest import 失败，需在服务器/NPU 环境执行 GQA、MLA 相关 UT 和真实 A/B。
+
+### 2026-07-21：澄清 Sparse C8 主 cache 的单 packed field
+
+- “Sparse C8 主 cache 是单个 packed field”只描述 `current_sparse_c8` 对应的主 MLA cache 路径，不表示整个 Sparse MLA 只有一个 cache。该路径在分配阶段令 `k_tensor_size=kv_cache_tensor.size` 并只返回 `(k_tensor,)`；reshape 阶段只解包 `raw_k_tensor`，以 C8 dtype 建立一个主 cache view，最终绑定 `(k_cache,)`，没有独立 `raw_v_tensor` 或 V view。
+- 与之相对，GQA 使用独立 raw K 和 raw V；标准 MLA 使用独立 raw latent/NoPE 与 raw RoPE，因此可用 `SplitKVLayout`。若强行把 Sparse C8 放进二字段 Layout，只能虚构一个 V/第二字段或零大小 buffer，会改变 allocation、对齐和算子输入 tuple 的真实契约。Sparse C8 的 SFA indexer K 和可选 scale 仍通过独立 `AscendSFAIndexerCacheSpec`/专用路径分配和绑定；它们不应与主 packed field 混为一谈。
