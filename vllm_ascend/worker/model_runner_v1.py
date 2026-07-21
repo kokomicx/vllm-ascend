@@ -65,7 +65,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
-    FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -4015,25 +4014,26 @@ class NPUModelRunner(GPUModelRunner):
         head_size_v = kv_cache_spec.head_size_v if hasattr(kv_cache_spec, "head_size_v") else kv_cache_spec.head_size
         return kv_cache_spec.head_size, head_size_v
 
-    def _get_gqa_kv_cache_layout(
+    def _get_split_kv_cache_layout(
         self,
         layer_name: str,
-        kv_cache_spec: FullAttentionSpec,
+        kv_cache_spec: AttentionSpec,
     ) -> SplitKVLayout:
-        """Build the two-field layout used by the GQA full-attention backend."""
+        """Build the layout for attention caches with independent K/V fields."""
         key_dim, value_dim = self._get_attention_kv_cache_dims(layer_name, kv_cache_spec)
         assert key_dim > 0 and value_dim > 0
         key_dtype = value_dtype = kv_cache_spec.dtype
         head_dims = [key_dim, value_dim]
-        if enable_fa_quant(self.vllm_config):
+        if not self.use_sparse and enable_fa_quant(self.vllm_config):
             key_split_factor, value_split_factor = self.vllm_config.quant_config.get_kv_quant_split_factor(
                 layer_name, head_dims
             )
+        else:
+            key_split_factor, value_split_factor = calc_split_factor(head_dims)
+        if enable_fa_quant(self.vllm_config):
             key_dtype, value_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
                 layer_name, kv_cache_spec.dtype, self.model_config
             )
-        else:
-            key_split_factor, value_split_factor = calc_split_factor(head_dims)
         return SplitKVLayout(
             key_dim=key_dim,
             value_dim=value_dim,
@@ -4230,28 +4230,10 @@ class NPUModelRunner(GPUModelRunner):
 
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         kv_cache_raw_tensors[layer_name_inner] = raw_cache
-                elif (
-                    isinstance(layer_kv_cache_spec[layer_name], FullAttentionSpec)
-                    and layer_name not in kv_cache_raw_tensors
-                    and not use_mamba
-                ):
-                    layout = self._get_gqa_kv_cache_layout(
-                        layer_name,
-                        layer_kv_cache_spec[layer_name],
-                    )
-                    key_tensor_size, value_tensor_size = layout.raw_tensor_sizes(kv_cache_tensor.size)
-                    raw_cache = (
-                        self._allocate_int8_cache_tensor(key_tensor_size, alignment),
-                        self._allocate_int8_cache_tensor(value_tensor_size, alignment),
-                    )
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        kv_cache_raw_tensors[layer_name_inner] = raw_cache
                 elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors and not use_mamba:
-                    # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
-                    # v cache tensor (rope cache tensor in mla) separately to support prefill disaggregation,
-                    # as it only support the 0-dim of kv_cache is `num_blocks`.
-                    # For deepseek mla, we need to spilt cache tensor accrodding to the nope head dim
-                    # and rope head dim.
+                    # GQA K/V and MLA latent/NoPE + RoPE both use two independently
+                    # allocated cache fields. Sparse C8 is the exception: its main
+                    # cache is one packed field and remains on the dedicated path.
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(current_kv_cache_spec, AttentionSpec)
                     current_sparse_c8 = self.use_sparse and kv_cache_spec_uses_sparse_c8(
@@ -4260,44 +4242,21 @@ class NPUModelRunner(GPUModelRunner):
 
                     if current_sparse_c8:
                         k_tensor_size = kv_cache_tensor.size
-                        v_tensor_size = None
+                        raw_cache = (
+                            self._allocate_int8_cache_tensor(k_tensor_size, alignment),
+                        )
                     else:
-                        k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
-                        assert k_dim > 0 and v_dim > 0
-                        kv_head_dim_list = [
-                            k_dim,
-                            v_dim,
-                        ]
-                        if not self.use_sparse and enable_fa_quant(self.vllm_config):
-                            k_tensor_split_factor, v_tensor_split_factor = (
-                                self.vllm_config.quant_config.get_kv_quant_split_factor(layer_name, kv_head_dim_list)
-                            )
-                        else:
-                            k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
-                        k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
-                        v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
-                    # Allocate raw int8 tensors. Even bf16/fp16 KV cache entries
-                    # are allocated as int8 raw bytes first and then viewed as
-                    # the target dtype in _reshape_kv_cache_tensors.
-                    v_tensor = None
-                    k_tensor = self._allocate_int8_cache_tensor(
-                        k_tensor_size,
-                        alignment,
-                    )
-                    if v_tensor_size is not None:
-                        v_tensor = self._allocate_int8_cache_tensor(
-                            v_tensor_size,
-                            alignment,
+                        layout = self._get_split_kv_cache_layout(layer_name, current_kv_cache_spec)
+                        key_tensor_size, value_tensor_size = layout.raw_tensor_sizes(kv_cache_tensor.size)
+                        raw_cache = (
+                            self._allocate_int8_cache_tensor(key_tensor_size, alignment),
+                            self._allocate_int8_cache_tensor(value_tensor_size, alignment),
                         )
 
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the attn kvcache for all shared layers
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
-                            if current_sparse_c8:
-                                kv_cache_raw_tensors[layer_name_inner] = (k_tensor,)
-                            else:
-                                assert v_tensor is not None
-                                kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor)
+                            kv_cache_raw_tensors[layer_name_inner] = raw_cache
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
@@ -4470,29 +4429,6 @@ class NPUModelRunner(GPUModelRunner):
                     current_sparse_c8 = self.use_sparse and kv_cache_spec_uses_sparse_c8(
                         current_kv_cache_spec
                     )
-                    if (
-                        isinstance(current_kv_cache_spec, FullAttentionSpec)
-                        and not self.use_sparse
-                        and not self.use_hybrid_blocks
-                    ):
-                        raw_key_tensor, raw_value_tensor = kv_cache_raw_tensors[layer_name]  # type: ignore[misc]
-                        num_blocks = (
-                            raw_key_tensor.numel() + raw_value_tensor.numel()
-                        ) // current_kv_cache_spec.page_size_bytes
-                        assert num_blocks >= kv_cache_config.num_blocks
-                        kv_cache_shape = attn_backend.get_kv_cache_shape(
-                            num_blocks,
-                            current_kv_cache_spec.block_size,
-                            current_kv_cache_spec.num_kv_heads,
-                            current_kv_cache_spec.head_size,
-                        )
-                        layout = self._get_gqa_kv_cache_layout(layer_name, current_kv_cache_spec)
-                        kv_caches[layer_name] = layout.reshape(
-                            raw_key_tensor,
-                            raw_value_tensor,
-                            kv_cache_shape,
-                        )
-                        continue
                     if self.use_sparse and "cache_only_layers" not in layer_name:
                         raw_cache = kv_cache_raw_tensors[layer_name]
                         assert isinstance(raw_cache, tuple)
@@ -4637,27 +4573,19 @@ class NPUModelRunner(GPUModelRunner):
                             num_kv_heads,
                             v_dim,
                         )
-                    k_cache_dtype = v_cache_dtype = current_kv_cache_spec.dtype
-                    if enable_fa_quant(self.vllm_config):
-                        k_cache_dtype, v_cache_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
-                            layer_name, current_kv_cache_spec.dtype, self.model_config
-                        )
-
                     if current_sparse_c8:
-                        k_cache_dtype = self.c8_k_cache_dtype
-
-                    k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
-                    if current_sparse_c8:
-                        v_cache = None
-                    else:
-                        assert raw_v_tensor is not None
-                        v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
-
-                    if current_sparse_c8:
+                        k_cache = raw_k_tensor.view(self.c8_k_cache_dtype).view(k_shape)
                         kv_caches[layer_name] = (k_cache,)
-                    else:
-                        assert v_cache is not None
-                        kv_caches[layer_name] = (k_cache, v_cache)
+                        continue
+
+                    assert raw_v_tensor is not None
+                    layout = self._get_split_kv_cache_layout(layer_name, current_kv_cache_spec)
+                    kv_caches[layer_name] = layout.reshape(
+                        raw_k_tensor,
+                        raw_v_tensor,
+                        k_shape,
+                        v_shape,
+                    )
                 elif isinstance(current_kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     assert raw_tensor is not None
