@@ -834,3 +834,8 @@ vllm-ascend/
 - `vllm_ascend/worker/model_runner_v1.py` 的 `FullAttentionSpec`（GQA）路径现在通过 `_get_gqa_kv_cache_layout()` 构造该布局：量化场景仍调用原有 `get_kv_quant_split_factor()` / `get_kv_quant_dtype()`，非量化场景仍使用原有 `calc_split_factor()`；raw K/V allocation 与 reshape/view 由 Layout 承接。Hybrid、MLA、Sparse MLA、C8、Compressed MLA、Mamba 和 cache-only 等路径没有改动，避免首个样例扩大行为范围。
 - 新增 `tests/ut/attention/test_kv_cache_layout.py`，覆盖不同 K/V head dimension 的字节切分、shape 和 dtype；同时在 `tests/ut/worker/a2/test_model_runner_v1.py` 增加 GQA 的 `head_size=64`、`head_size_v=32` 集成覆盖，验证 runner 路由后 V 的独立维度没有被 K 维度覆盖。
 - 本机 `py_compile`、`ruff check`、`ruff format --check` 和 `git diff --check` 已通过；针对性 pytest 因当前 Windows Python 环境未安装 `torch`，在导入 `tests/ut/conftest.py` 时失败，未能在本机执行。后续必须在 A3/NPU 环境执行对应 UT，并用既有 `gate=0/1` metadata（tensor 数/shape/dtype/contiguous）和固定生成 token-ID 严格 A/B 验证 GQA 行为，再作为 PR 测试证据。
+
+### 2026-07-21：服务器拉取 GQA PR 的 DNS 阻塞
+
+- 在 `k8s-node-48` 执行 `git fetch myfork feature/gqa-kv-layout-pr` 时出现 `ssh: Could not resolve hostname github.com: Temporary failure in name resolution`。这说明服务器当前无法通过 DNS 将 `github.com` 解析为 IP，失败发生在 SSH 连接建立之前；它不表示远程分支不存在，也不是 Git SSH key、GitHub 仓库权限或本地 worktree 的问题。
+- 应先在服务器检查 `getent hosts github.com`、`getent hosts ssh.github.com`、`cat /etc/resolv.conf` 及集群规定的代理/DNS 配置；DNS 恢复后重试原 `git fetch` 即可。不要通过改 hosts、关闭证书校验或把 GitHub IP 硬编码为长期方案绕过集群网络策略。
