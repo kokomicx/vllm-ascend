@@ -943,3 +943,9 @@ vllm-ascend/
 - 在服务器 `feature/gqa-kv-layout-pr` 的 `1d404b67` 上执行 `python -m pytest -q tests/ut/attention/test_kv_cache_layout.py tests/ut/worker/a2/test_model_runner_v1.py`，结果为 **20 passed**（9.01 秒）。`git status --short` 没有输出，表明测试在干净的 PR checkout 上执行。
 - 该结果证明：vLLM-Ascend 插件及其 patch 可以正常导入；`SplitKVLayout` 对 two-field raw byte split、不同 K/V field dimension 的 dtype/view reshape 契约成立；NPUModelRunner 能依据层级 `FullAttentionSpec` 进行 GQA raw K/V 分配和 reshape，且 V 的独立 `head_size_v` 不会误复用 K 的 dimension。现有覆盖也同时回归了 Sparse MLA main/indexer 相关的 runner 路由。
 - 此为 PR 的第一层正确性证据（Python/Runner 逻辑），但尚不等价于真实模型推理精度证明；后续仍需在同一 NPU 环境以 GQA 模型完成旧基线与新分支的 KV metadata 和固定生成 token ID A/B 对比。
+
+### 2026-07-21：GQA 真实模型 A/B 验证方案
+
+- 第二层验证不再依赖旧的 `VLLM_ASCEND_USE_KV_LAYOUT_DISPATCH=0/1` gate，而是将 `feature/gqa-kv-layout-pr` 的 merge-base（重构前基线）与当前 PR HEAD 分别作为两次真实运行的代码源。两次运行必须使用同一 vLLM built 环境、同一 GQA 模型（`/mnt/weights/Qwen3-30B-A3B`）、同一空闲 NPU、相同 `max-model-len=2048`、`gpu_memory_utilization=0.80`、prompt、temperature=0 和 seed=42。
+- 复用已有的独立 E2E snapshot 工具：每次运行从 engine-core 内部通过 `VLLM_ASCEND_DUMP_KV_CACHE` 导出 metadata，并记录 8 个生成 token ID；随后严格比较 layer 数、每层 container/tensor 数、shape、dtype、contiguous 与 token ID。为了避免工具脚本自身所在目录意外决定被测源码，工具脚本应放在 `/tmp`，并以 `PYTHONPATH=<baseline-or-candidate-worktree>` 明确指定实际导入的 `vllm_ascend`。
+- 通过标准为 comparison 输出 `[PASS]`、所有层 metadata 一致且生成 token IDs identical；若全层仅第一维块数产生一致的 1-block 差异，应先排查运行间可用显存波动并用同一空闲 NPU重跑/反向运行，不应直接判断为代码回归。
