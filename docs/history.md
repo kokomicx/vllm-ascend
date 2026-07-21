@@ -859,3 +859,8 @@ vllm-ascend/
 
 - 重构前，`model_runner_v1.py` 的通用 attention 分支同时内联 K/V 维度推导、FA quant split factor/dtype 选择、raw K/V bytes 切分、raw int8 allocation 以及根据 backend shape 的 K/V view；同一段分支还需兼顾 MLA、Sparse、Hybrid 等不同路径。重构后，GQA 的 `FullAttentionSpec` 单独路由至 `_get_gqa_kv_cache_layout()`，将二字段物理布局参数传给 `SplitKVLayout`；Runner 保留 allocation、shared_by 和 cache 生命周期，Layout 负责 `raw_tensor_sizes()` 与 `reshape()`。
 - 该改动保持量化和内存语义：quant split factor/dtype 仍调用原接口，raw allocation 仍使用原 `_allocate_int8_cache_tensor()` 和对齐逻辑，shape 仍由 attention backend 的 `get_kv_cache_shape()` 给出。新分支仅在非 Sparse、非 Hybrid 的 `FullAttentionSpec` 走 Layout；MLA、Sparse MLA、C8、Mamba、Compressed、Hybrid 和 cache-only 路径维持旧代码。新增 direct Layout UT 与不同 K/V head dimension 的 GQA Runner UT，专门防止 V shape 被误用为 K shape。
+
+### 2026-07-21：查看 GQA PR Git diff 的方式
+
+- GitHub 网页评审应从 fork 的 `feature/gqa-kv-layout-pr` 创建到上游 `main` 的 PR，然后打开 **Files changed**；也可直接用 GitHub compare URL 比较 `main...feature/gqa-kv-layout-pr`。PR 页面展示的就是评审基线与分支 HEAD 的完整 diff，适合逐行留言与 review。
+- 本地在干净 GQA worktree 中可用 `git diff origin/main...HEAD` 查看相对共同祖先的完整 PR diff，`git diff --stat origin/main...HEAD` 查看文件统计，`git diff origin/main...HEAD -- <file>` 聚焦单文件，`git show 107d9186` 查看该单个提交。三点语法 `A...B` 以二者共同祖先作为基线，适合 PR 对比；不要误用 `A..B` 来判断完整 PR 内容。
