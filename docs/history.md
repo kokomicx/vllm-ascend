@@ -864,3 +864,8 @@ vllm-ascend/
 
 - GitHub 网页评审应从 fork 的 `feature/gqa-kv-layout-pr` 创建到上游 `main` 的 PR，然后打开 **Files changed**；也可直接用 GitHub compare URL 比较 `main...feature/gqa-kv-layout-pr`。PR 页面展示的就是评审基线与分支 HEAD 的完整 diff，适合逐行留言与 review。
 - 本地在干净 GQA worktree 中可用 `git diff origin/main...HEAD` 查看相对共同祖先的完整 PR diff，`git diff --stat origin/main...HEAD` 查看文件统计，`git diff origin/main...HEAD -- <file>` 聚焦单文件，`git show 107d9186` 查看该单个提交。三点语法 `A...B` 以二者共同祖先作为基线，适合 PR 对比；不要误用 `A..B` 来判断完整 PR 内容。
+
+### 2026-07-21：GQA PR 全绿 diff 的含义与边界
+
+- `107d9186` 相对 `main` 的 Files changed 全为绿色是准确结果：该提交新增 `SplitKVLayout`、GQA dispatch 及测试，但没有删除任何行。旧的 K/V split/view 代码位于仍被标准 MLA、Sparse、Hybrid 等场景共用的 generic attention 分支中，不是可安全直接删除的 GQA 专属分支；GQA 现在由更早的 `FullAttentionSpec` 分支截获，其他路径继续使用原分支。
+- 因此当前首个 PR 不能宣称“总代码行数减少”或“完全消除了 Runner 中的重复逻辑”；其可审查价值是把普通 GQA 的二字段物理布局建立为明确、独立可测的边界，且不扩大其他模型行为。若 TMG/评审要求实际压缩 Runner 代码，下一阶段应在已验证 MLA 可复用该契约后，把共享二字段逻辑进一步参数化并迁移，而不是为了制造删除行数强行移除仍被其他路径依赖的 generic 分支。
