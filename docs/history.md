@@ -844,3 +844,8 @@ vllm-ascend/
 
 - `k8s-node-48` 上 `getent hosts github.com` 和 `getent hosts ssh.github.com` 均无输出；`/etc/resolv.conf` 仅配置 `nameserver 90.90.96.1` 与搜索域 `huawei.com`。因此该环境当前不能直接连接或拉取 GitHub 远端，需等待/申请 DNS、代理或内部 Git 镜像访问恢复后再执行 `git fetch`。
 - 当前 `myfork` 的 URL 确实是 `git@github.com:kokomicx/vllm-ascend.git`，所以目标分支在 GitHub；失败原因是服务器侧网络解析不可用，而非分支未推送。`ip: command not found` 只表示容器镜像未安装 iproute2 工具，对上述 DNS 结论没有影响。
+
+### 2026-07-21：修正服务器 GitHub 访问结论
+
+- 随后在同一服务器执行默认 `git pull` 成功：其 `origin` 使用 HTTPS URL `https://github.com/kokomicx/vllm-ascend`，并已拉取 `origin/feature/gqa-kv-layout-pr`。因此服务器不是完全不能访问 GitHub；此前失败的范围应精确表述为 `myfork` 的 SSH URL `git@github.com:...` 无法解析/连接，而非 HTTPS Git 访问整体不可用。
+- 后续服务器侧应直接使用已经成功的 `origin` 远端：从 `origin/feature/gqa-kv-layout-pr` 创建或切换工作区，无需再使用失败的 `myfork` SSH 远端。HTTPS 能成功而本地 `getent` 无结果，通常意味着 Git 配置/环境走了企业 HTTPS 代理或其他受管网络通道；无需也不应手动更改系统 DNS。
