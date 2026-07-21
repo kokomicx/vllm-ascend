@@ -898,3 +898,9 @@ vllm-ascend/
 
 - 为导师沟通整理整体链路图：`KVCacheSpec` 先区分 main attention、SFA Indexer、Mamba/cache-only/Compressed 等语义，Runner 再负责 raw storage allocation、跨层共享与 binding；two-field main attention（GQA K/V、标准 MLA latent/NoPE + RoPE、非 packed Sparse MLA main）由 `SplitKVLayout` 处理 bytes split/dtype/view，backend 提供最终 shape。SFA Indexer spec 及 packed C8 main cache 走独立专用路径。
 - 图中应特别表达“一个 Sparse MLA layer 的总 cache”由 main attention cache 与独立 Indexer cache 组合而成：普通为 2+1=3，Indexer C8 为 2+2=4，主 packed C8 加量化 Indexer 为 1+2=3；最终各 cache entry 按 layer name 绑定到 static forward context/attention module。
+
+### 2026-07-21：专用路径是否可继续抽离为 Layout 的设计判断
+
+- Indexer、packed C8、Mamba、Hybrid 并非“不能抽离”，而是不能错误复用 `SplitKVLayout`。Indexer 有稳定的独立 spec（K，或 K+scale）以及 DCP replication/scale alignment 契约，是后续最适合评估抽离 `SFAIndexerLayout` 或参数化 multi-field helper 的候选；其抽离应同时覆盖 allocation 与 reshape，避免只搬运少量代码。
+- packed C8 main cache 可抽为 single/packed-field layout，但当前 Runner 中只有少量 allocation + view，若没有第二个相同契约的使用者，新增类反而会增加抽象成本；等待更多 packed 场景或重复代码后再决定。Mamba 的 `MambaSpec.shapes`/`dtypes` 多 state carving 是适合参数化 state-field layout 的候选，但需保持 page padding 与 state 顺序。Hybrid 主要是共享 raw storage、padding、block-size 和跨 attention/Mamba 协调的生命周期策略，其中一部分 view 逻辑可抽取，但 allocation/共享协调应仍留在 Runner。
+- 推荐演进顺序：先以当前 two-field `SplitKVLayout` 完成 GQA/标准 MLA 的测试与评审；若 Indexer 分配/reshape 的重复与边界稳定，再单独设计/验证 Indexer multi-field primitive；随后评估 Mamba state-field primitive；Hybrid 最后按“Runner 协调 + 可抽 view helper”拆分。不要预先创建按模型命名的一组 Layout 类，也不要为了统一而引入万能 Plan。
