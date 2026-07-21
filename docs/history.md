@@ -893,3 +893,8 @@ vllm-ascend/
 - 标准（非 Sparse）MLA 的主 attention cache 只有两个 tensor：latent/NoPE（由 `kv_lora_rank` 决定）和 RoPE（由 `qk_rope_head_dim` 决定）；它正是 `SplitKVLayout` 覆盖的二字段 MLA 场景，不存在第三个 Indexer tensor。
 - Sparse MLA 在这对主 cache 之外新增了 SFA Indexer cache，因而普通 Sparse MLA 总计为 3：`(latent/NoPE, RoPE)` 由主 `AscendMLAAttentionSpec` 走 `SplitKVLayout`，`(indexer_k,)` 由独立 `AscendSFAIndexerCacheSpec` 走其专用分支。Indexer C8 时该独立分支返回 `(indexer_k, indexer_scale)`，与主 two-field 合计为 4。
 - Runner 的处理顺序体现了该边界：先识别 `AscendSFAIndexerCacheSpec` 并独立 allocation/reshape，再处理 generic attention 的主 MLA spec；二者最终以不同 layer name 的 cache entry 绑定给对应模块。不能把第三个 indexer tensor 当作主 MLA two-field Layout 的第三字段，否则会混淆独立 spec、DCP replication、scale dtype 与算子输入契约。
+
+### 2026-07-21：KV cache 整体代码逻辑架构图
+
+- 为导师沟通整理整体链路图：`KVCacheSpec` 先区分 main attention、SFA Indexer、Mamba/cache-only/Compressed 等语义，Runner 再负责 raw storage allocation、跨层共享与 binding；two-field main attention（GQA K/V、标准 MLA latent/NoPE + RoPE、非 packed Sparse MLA main）由 `SplitKVLayout` 处理 bytes split/dtype/view，backend 提供最终 shape。SFA Indexer spec 及 packed C8 main cache 走独立专用路径。
+- 图中应特别表达“一个 Sparse MLA layer 的总 cache”由 main attention cache 与独立 Indexer cache 组合而成：普通为 2+1=3，Indexer C8 为 2+2=4，主 packed C8 加量化 Indexer 为 1+2=3；最终各 cache entry 按 layer name 绑定到 static forward context/attention module。
