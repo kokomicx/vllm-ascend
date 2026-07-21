@@ -869,3 +869,10 @@ vllm-ascend/
 
 - `107d9186` 相对 `main` 的 Files changed 全为绿色是准确结果：该提交新增 `SplitKVLayout`、GQA dispatch 及测试，但没有删除任何行。旧的 K/V split/view 代码位于仍被标准 MLA、Sparse、Hybrid 等场景共用的 generic attention 分支中，不是可安全直接删除的 GQA 专属分支；GQA 现在由更早的 `FullAttentionSpec` 分支截获，其他路径继续使用原分支。
 - 因此当前首个 PR 不能宣称“总代码行数减少”或“完全消除了 Runner 中的重复逻辑”；其可审查价值是把普通 GQA 的二字段物理布局建立为明确、独立可测的边界，且不扩大其他模型行为。若 TMG/评审要求实际压缩 Runner 代码，下一阶段应在已验证 MLA 可复用该契约后，把共享二字段逻辑进一步参数化并迁移，而不是为了制造删除行数强行移除仍被其他路径依赖的 generic 分支。
+
+### 2026-07-21：通用 two-field attention 分支收敛至 SplitKVLayout
+
+- 根据全绿 diff 的复盘，GQA PR 继续提交 `1d404b67`（`refactor(kv_cache): reuse split layout in attention path`）并已推送到 `feature/gqa-kv-layout-pr`。本次不再为 GQA 额外增加提前截获分支，而是直接重构原 `elif "attn" in layer_name` 的共享 two-field 路径：GQA 的 K/V 与标准 MLA 的 latent/NoPE + RoPE 统一调用 `_get_split_kv_cache_layout()`、`SplitKVLayout.raw_tensor_sizes()` 和 `SplitKVLayout.reshape()`。
+- `SplitKVLayout.reshape()` 改为接收由 attention backend shape 派生的 `key_shape` 与 `value_shape`，并断言二者最后一维与 Layout field dim 一致；这使同一 Layout primitive 能支持 GQA backend 的 K/V 形态和 MLA backend 的 latent/NoPE、RoPE 形态，而无需按模型新建 Layout 类。Runner 仍负责 backend shape 获取、raw allocation、shared_by 和 cache 生命周期；Layout 只负责二字段的 bytes split、dtype 与 view。
+- Sparse C8 主 cache 仍是单 packed field，不能伪装为 two-field Layout，因此保留专用单 tensor 分支；SFA indexer、Compressed MLA、Hybrid shared raw storage、Mamba 和 cache-only 同样维持既有专用处理。重构不以强行统一不同物理契约为目标。
+- 相对上游基线 `585d76c7`，总 PR diff 为 166 additions / 56 deletions；其中 `model_runner_v1.py` 为 53 additions / 56 deletions（净减少 3 行）。新增 Layout 和测试文件使 PR 总行数仍增加，但原 Runner generic 分支中内联的维度 split、量化 factor/dtype 选择、双 raw allocation 与双 view 已出现实际红色删除，职责和重复逻辑均得到收敛。`py_compile`、`ruff check`、`ruff format --check`、`git diff --check` 通过；pytest 仍在 Windows 环境因缺少 `torch` 的 conftest import 失败，需在服务器/NPU 环境执行 GQA、MLA 相关 UT 和真实 A/B。
