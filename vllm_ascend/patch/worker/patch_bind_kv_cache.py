@@ -3,6 +3,11 @@ import vllm.v1.worker.utils as utils
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
+from vllm_ascend.attention.gqa_kv_cache import (
+    bind_standard_gqa_kv_cache,
+    uses_upstream_kv_cache_layout,
+)
+
 
 # Without this patch, it will raise an exception when initialize kv_cache.
 # TODO To remove the patch, we need check why the original bind_kv_cache raises an NotImplementedError.
@@ -47,4 +52,23 @@ def bind_kv_cache(
         forward_context[layer_name].kv_cache = kv_cache
 
 
-utils.bind_kv_cache = bind_kv_cache
+if uses_upstream_kv_cache_layout():
+    _original_attention_bind_kv_cache = Attention.bind_kv_cache
+
+    def _bind_attention_kv_cache(self: Attention, kv_cache: torch.Tensor) -> None:
+        backend = self.get_attn_backend()
+        is_ascend_gqa = (
+            backend.__module__ == "vllm_ascend.attention.attention_v1"
+            and backend.__name__ == "AscendAttentionBackend"
+        )
+        if not is_ascend_gqa:
+            _original_attention_bind_kv_cache(self, kv_cache)
+            return
+        bind_standard_gqa_kv_cache(self, kv_cache)
+
+    # Keep upstream worker.bind_kv_cache: it owns runner ordering and invokes
+    # each layer's bind hook. Only the Ascend GQA hook needs adaptation.
+    Attention.bind_kv_cache = _bind_attention_kv_cache
+else:
+    # The currently pinned vLLM still allocates Ascend's legacy K/V pair.
+    utils.bind_kv_cache = bind_kv_cache

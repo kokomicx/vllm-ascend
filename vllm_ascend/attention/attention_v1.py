@@ -40,8 +40,16 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
+try:
+    from vllm.v1.kv_cache_layout import KVCacheLayout
+except ImportError:
+    # KVCacheLayout is introduced by the upstream layout refactor. Keep the
+    # plugin importable with the currently pinned vLLM until main2main moves.
+    KVCacheLayout = None  # type: ignore[assignment, misc]
+
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.gqa_kv_cache import customize_standard_gqa_spec
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PagedAttentionGraphParam,
@@ -115,6 +123,18 @@ class AscendAttentionBackend(AttentionBackend):
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
         return (2, num_blocks, block_size, num_kv_heads, head_size)
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        return customize_standard_gqa_spec(spec)
+
+    @classmethod
+    def supported_kv_cache_layouts(cls):
+        if KVCacheLayout is None:
+            return None
+        # H is the two K/V groups. Keeping H outside B makes each group a
+        # contiguous [block, token, head, dim] region for existing kernels.
+        return (KVCacheLayout.LHBNC,)
 
     @staticmethod
     def swap_blocks(

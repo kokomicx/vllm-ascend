@@ -116,6 +116,10 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAtt
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
+from vllm_ascend.attention.gqa_kv_cache import (
+    is_standard_gqa_kv_cache_config,
+    normalize_kernel_block_sizes,
+)
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -3699,10 +3703,23 @@ class NPUModelRunner(GPUModelRunner):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        # Initialize the memory buffer for KV cache
-        kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
-        # Change the memory buffer to the desired shape
-        kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
+        if is_standard_gqa_kv_cache_config(kv_cache_config):
+            # New vLLM owns the physical layout and backing allocation. Keep
+            # the standard per-layer tensors in the runner; Ascend's layer
+            # bind hook exposes the K/V views required by the kernel.
+            from vllm.v1.worker.utils import allocate_kv_cache
+
+            kv_caches = allocate_kv_cache(
+                kv_cache_config,
+                self.device,
+                self.cache_config.get_resolved_kv_cache_layout(),
+                normalize_kernel_block_sizes(self.kernel_block_sizes),
+            )
+        else:
+            # Legacy and special-spec path. MLA/SFA/Mamba/hybrid migration is
+            # intentionally independent from the initial standard GQA path.
+            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+            kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
